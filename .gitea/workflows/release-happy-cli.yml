@@ -23,10 +23,17 @@
 
 name: Release happy-cli
 
+# NOTE: Gitea automatic trigger disabled — happy-cli multi-platform
+# bundles (macOS arm64/x64, Linux x64, Windows x64) are now built by
+# `.github/workflows/release-cli-bundles.yml` on GitHub Actions, which
+# is the only place we have access to macOS / Windows runners.
+# The GH workflow uploads all 4 bundles to the same Gitea Release.
+#
+# This Gitea workflow is kept as `workflow_dispatch` only — useful for:
+#   - manually re-building the linux x64 bundle on your `test` runner
+#     if the GH path is unavailable;
+#   - producing the npm tarball (source) without depending on GH.
 on:
-  push:
-    tags:
-      - "happy-cli-v*"
   workflow_dispatch:
     inputs:
       version:

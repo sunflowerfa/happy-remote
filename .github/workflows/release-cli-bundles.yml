@@ -1,0 +1,219 @@
+# GitHub Actions — happy-cli multi-platform bundle build farm
+#
+# 借用 GitHub 免费提供的 macOS / Windows / Linux runner 编译 node-pty
+# native binding 并打包 standalone bundle，构建产物推送回你的 Gitea Release。
+#
+# 触发：
+#   - push tag `happy-cli-v*`（推荐：`git push github happy-cli-v1.1.10-beta.4`）
+#   - workflow_dispatch（GitHub Actions UI 手动触发，输入 version）
+#
+# 需要在 GitHub 仓库 Settings → Secrets and Variables → Actions 配置：
+#   GITEA_TOKEN   你的 Gitea PAT，scope: write:repository, write:package
+#
+# 产物：上传到 Gitea Release 的 4 个 tarball：
+#   happy-cli-<ver>-macos-arm64.tar.gz
+#   happy-cli-<ver>-macos-x64.tar.gz
+#   happy-cli-<ver>-linux-x64.tar.gz
+#   happy-cli-<ver>-windows-x64.zip
+
+name: release-cli-bundles
+
+on:
+  push:
+    tags:
+      - "happy-cli-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (no v prefix), e.g. 1.1.10-beta.4"
+        required: true
+        type: string
+
+env:
+  GITEA_BASE: https://open-1.kfafa.cn:30010
+  GITEA_OWNER: sunflowerfa
+  GITEA_REPO: happy
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+      tag: ${{ steps.derive.outputs.tag }}
+    steps:
+      - name: Derive version
+        id: derive
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#happy-cli-v}"
+          fi
+          TAG="happy-cli-v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building ${TAG}"
+
+      - name: Ensure Gitea Release exists (idempotent)
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          TAG: ${{ steps.derive.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          API="${{ env.GITEA_BASE }}/api/v1/repos/${{ env.GITEA_OWNER }}/${{ env.GITEA_REPO }}/releases"
+          # 已存在？
+          STATUS=$(curl -s -o /tmp/release.json -w "%{http_code}" \
+            -H "Authorization: token ${GITEA_TOKEN}" \
+            "${API}/tags/${TAG}")
+          if [ "$STATUS" = "200" ]; then
+            echo "Release ${TAG} already exists; will append assets."
+            exit 0
+          fi
+          # 不存在 → 创建
+          echo "Creating Release ${TAG} ..."
+          curl -fsSL -X POST \
+            -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"happy-cli ${TAG#happy-cli-v}\n\nStandalone bundles for macOS arm64/x64, Linux x64, Windows x64.\"}" \
+            "${API}"
+
+  bundle:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,   os: linux,   arch: x64,   archive: tar }
+          - { runner: macos-13,        os: macos,   arch: x64,   archive: tar }
+          - { runner: macos-14,        os: macos,   arch: arm64, archive: tar }
+          - { runner: windows-latest,  os: windows, arch: x64,   archive: zip }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install workspace deps (compiles node-pty for this platform)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build happy-cli
+        run: pnpm --filter happy build
+
+      - name: Verify node-pty native binding
+        shell: bash
+        run: |
+          set -e
+          NATIVE=$(find packages/happy-cli/node_modules/node-pty -name "*.node" -print -quit || true)
+          if [ -z "$NATIVE" ]; then
+            echo "ERROR: node-pty native binding not built — bundle would be broken on ${{ matrix.os }}-${{ matrix.arch }}."
+            ls -la packages/happy-cli/node_modules/node-pty/build/Release/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "Found native binding: $NATIVE"
+
+      - name: Stage bundle (Unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.prepare.outputs.version }}"
+          STAGE="happy-cli-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "dist-release/${STAGE}"
+          cp -R packages/happy-cli/dist            "dist-release/${STAGE}/dist"
+          cp -R packages/happy-cli/bin             "dist-release/${STAGE}/bin"
+          cp -R packages/happy-cli/scripts         "dist-release/${STAGE}/scripts"
+          cp -R packages/happy-cli/tools           "dist-release/${STAGE}/tools" 2>/dev/null || true
+          cp     packages/happy-cli/package.json   "dist-release/${STAGE}/package.json"
+          cp     packages/happy-cli/README.md      "dist-release/${STAGE}/README.md" 2>/dev/null || true
+          cp     LICENSE                            "dist-release/${STAGE}/LICENSE" 2>/dev/null || true
+          # vendored node_modules（含 prebuilt node-pty）
+          pnpm --filter happy deploy --prod --node-linker=hoisted "dist-release/${STAGE}-deploy"
+          cp -R "dist-release/${STAGE}-deploy/node_modules" "dist-release/${STAGE}/"
+          rm -rf "dist-release/${STAGE}-deploy"
+          tar -czf "happy-cli-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" \
+              -C dist-release "${STAGE}"
+          ls -la "happy-cli-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
+
+      - name: Stage bundle (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $VERSION = "${{ needs.prepare.outputs.version }}"
+          $STAGE = "happy-cli-$VERSION-windows-x64"
+          New-Item -ItemType Directory -Path "dist-release\$STAGE" -Force | Out-Null
+          Copy-Item -Recurse packages\happy-cli\dist     "dist-release\$STAGE\dist"
+          Copy-Item -Recurse packages\happy-cli\bin      "dist-release\$STAGE\bin"
+          Copy-Item -Recurse packages\happy-cli\scripts  "dist-release\$STAGE\scripts"
+          if (Test-Path packages\happy-cli\tools) {
+            Copy-Item -Recurse packages\happy-cli\tools  "dist-release\$STAGE\tools"
+          }
+          Copy-Item packages\happy-cli\package.json      "dist-release\$STAGE\package.json"
+          if (Test-Path packages\happy-cli\README.md) {
+            Copy-Item packages\happy-cli\README.md       "dist-release\$STAGE\README.md"
+          }
+          if (Test-Path LICENSE) {
+            Copy-Item LICENSE                            "dist-release\$STAGE\LICENSE"
+          }
+          pnpm --filter happy deploy --prod --node-linker=hoisted "dist-release\$STAGE-deploy"
+          Copy-Item -Recurse "dist-release\$STAGE-deploy\node_modules" "dist-release\$STAGE\node_modules"
+          Remove-Item -Recurse -Force "dist-release\$STAGE-deploy"
+          Compress-Archive -Path "dist-release\$STAGE\*" -DestinationPath "happy-cli-$VERSION-windows-x64.zip"
+          Get-Item "happy-cli-$VERSION-windows-x64.zip"
+
+      - name: Upload asset to Gitea Release
+        shell: bash
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+          EXT: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          if [ "${EXT}" = "zip" ]; then
+            FILE="happy-cli-${VERSION}-${OS}-${ARCH}.zip"
+          else
+            FILE="happy-cli-${VERSION}-${OS}-${ARCH}.tar.gz"
+          fi
+          API="${{ env.GITEA_BASE }}/api/v1/repos/${{ env.GITEA_OWNER }}/${{ env.GITEA_REPO }}/releases"
+          # 找到 Release id
+          REL_ID=$(curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" "${API}/tags/${TAG}" \
+                   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          # 若已有同名 asset 先删（支持重跑）
+          curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" "${API}/${REL_ID}/assets" \
+            | python3 -c "
+          import json, sys, os
+          assets = json.load(sys.stdin)
+          for a in assets:
+              if a['name'] == os.environ['FILE']:
+                  print(a['id'])
+                  break
+          " > /tmp/existing_id.txt
+          if [ -s /tmp/existing_id.txt ]; then
+            OLD_ID=$(cat /tmp/existing_id.txt)
+            echo "Deleting existing asset id=${OLD_ID}"
+            curl -fsSL -X DELETE -H "Authorization: token ${GITEA_TOKEN}" \
+              "${API}/${REL_ID}/assets/${OLD_ID}"
+          fi
+          # 上传
+          echo "Uploading ${FILE} → Release ${TAG} (id=${REL_ID})"
+          curl -fsSL -X POST \
+            -H "Authorization: token ${GITEA_TOKEN}" \
+            -F "attachment=@${FILE}" \
+            "${API}/${REL_ID}/assets?name=${FILE}"
