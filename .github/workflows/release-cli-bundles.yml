@@ -82,6 +82,23 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      # Workaround: pnpm 10.11.0 ships with node-gyp 11.1.0, which has a
+      # Windows regression in win_delay_load_hook.cc — narrow string passed
+      # to GetModuleHandleW (needs LPCWSTR), breaks node-pty's winpty
+      # subproject. Fixed in node-gyp 11.2.0. We point pnpm at a freshly
+      # installed node-gyp via the npm_config_node_gyp env var.
+      - name: Use latest node-gyp on Windows (avoids 11.1.0 winpty build bug)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          npm install -g node-gyp@latest
+          $gypBin = Join-Path (npm root -g) 'node-gyp\bin\node-gyp.js'
+          Write-Host "Using node-gyp at: $gypBin"
+          if (-not (Test-Path $gypBin)) {
+            throw "node-gyp binary not found at $gypBin after install"
+          }
+          "npm_config_node_gyp=$gypBin" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Install workspace deps (compiles node-pty for this platform)
         run: pnpm install --frozen-lockfile
 
