@@ -152,7 +152,7 @@ jobs:
           # We deliberately use --node-linker=hoisted to make the resulting tree
           # look like a classic npm install (no .pnpm/ folder), so the bundle
           # is directly runnable with `node ./bin/happy.mjs`.
-          pnpm --filter happy deploy --prod --node-linker=hoisted "dist-release/${STAGE}-deploy"
+          pnpm --filter happy deploy --legacy --prod --node-linker=hoisted "dist-release/${STAGE}-deploy"
           cp -R "dist-release/${STAGE}-deploy/node_modules" "dist-release/${STAGE}/"
           rm -rf "dist-release/${STAGE}-deploy"
           # Compress
@@ -180,7 +180,7 @@ jobs:
           if (Test-Path LICENSE) {
             Copy-Item LICENSE                            "dist-release\$STAGE\LICENSE"
           }
-          pnpm --filter happy deploy --prod --node-linker=hoisted "dist-release\$STAGE-deploy"
+          pnpm --filter happy deploy --legacy --prod --node-linker=hoisted "dist-release\$STAGE-deploy"
           Copy-Item -Recurse "dist-release\$STAGE-deploy\node_modules" "dist-release\$STAGE\node_modules"
           Remove-Item -Recurse -Force "dist-release\$STAGE-deploy"
           Compress-Archive -Path "dist-release\$STAGE\*" -DestinationPath "happy-cli-$VERSION-windows-x64.zip"

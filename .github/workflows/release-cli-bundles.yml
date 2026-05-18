@@ -133,7 +133,9 @@ jobs:
           cp     packages/happy-cli/README.md      "dist-release/${STAGE}/README.md" 2>/dev/null || true
           cp     LICENSE                            "dist-release/${STAGE}/LICENSE" 2>/dev/null || true
           # vendored node_modules（含 prebuilt node-pty）
-          pnpm --filter happy deploy --prod --node-linker=hoisted "dist-release/${STAGE}-deploy"
+          # --legacy: pnpm 10 起 deploy 默认要求 inject-workspace-packages=true，
+          # 我们没设；--legacy 走回 v9 的行为（happy-cli 没 workspace 依赖，安全）。
+          pnpm --filter happy deploy --legacy --prod --node-linker=hoisted "dist-release/${STAGE}-deploy"
           cp -R "dist-release/${STAGE}-deploy/node_modules" "dist-release/${STAGE}/"
           rm -rf "dist-release/${STAGE}-deploy"
           tar -czf "happy-cli-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" \
@@ -160,7 +162,7 @@ jobs:
           if (Test-Path LICENSE) {
             Copy-Item LICENSE                            "dist-release\$STAGE\LICENSE"
           }
-          pnpm --filter happy deploy --prod --node-linker=hoisted "dist-release\$STAGE-deploy"
+          pnpm --filter happy deploy --legacy --prod --node-linker=hoisted "dist-release\$STAGE-deploy"
           Copy-Item -Recurse "dist-release\$STAGE-deploy\node_modules" "dist-release\$STAGE\node_modules"
           Remove-Item -Recurse -Force "dist-release\$STAGE-deploy"
           Compress-Archive -Path "dist-release\$STAGE\*" -DestinationPath "happy-cli-$VERSION-windows-x64.zip"
