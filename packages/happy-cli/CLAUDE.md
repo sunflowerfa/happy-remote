@@ -8,6 +8,42 @@ Happy CLI (`handy-cli`) is a command-line tool that wraps Claude Code to enable 
 2. **handy** - React Native mobile client
 3. **handy-server** - Node.js server with Prisma (hosted at https://api.happy-servers.com/)
 
+## Remote Mode — Dual-track (PTY default, SDK opt-in)
+
+Starting 2026-06-15 Anthropic bills Claude Agent SDK / `claude -p` / Claude Code
+GitHub Actions / 3rd-party Agent-SDK apps against a separate "programmatic-usage"
+credit pool (Pro $20, Max 5x $100, Max 20x $200 per month, at API list prices).
+Interactive `claude` keeps drawing from the regular subscription pool.
+
+To keep daily remote-control usage on the subscription pool, happy-cli ships two
+remote-mode drivers that are interchangeable from the app's point of view:
+
+| Driver | Switch | Bills against | How it works |
+| --- | --- | --- | --- |
+| **PTY** (default) | `HAPPY_CLAUDE_REMOTE_IMPL=pty` (or unset) | Interactive subscription pool | Spawns `claude` under `node-pty`. Tool-call permissions arrive via Claude's PreToolUse hook → happy-cli HTTP server → `hookPermissionAdapter` → existing `PermissionHandler`. User messages are injected via bracketed-paste into the PTY. Assistant + tool_result stream comes from the canonical `~/.claude/projects/.../<sid>.jsonl` (sessionScanner). |
+| **SDK** (opt-in) | `HAPPY_CLAUDE_REMOTE_IMPL=sdk` | Agent-SDK programmatic-usage pool | Original implementation — `@anthropic-ai/claude-agent-sdk`'s `query()` with `canUseTool` callback. Kept for users with large Max plans / API credits where the SDK pool is sufficient. |
+
+PTY mode defaults `--permission-mode bypassPermissions` because the mobile app is
+the authorising surface; the PreToolUse hook still fires on every call so
+per-call deny/allow/rewrite decisions sent from the app are honoured.
+
+Files added for the PTY track:
+- `src/claude/claudeRemotePty.ts` — node-pty wrapper around `claude`
+- `src/claude/claudeRemotePtyLauncher.ts` — counterpart of `claudeRemoteLauncher.ts`
+- `src/claude/utils/hookPermissionAdapter.ts` — turns `PermissionHandler` into a hook decider
+- `src/claude/utils/resolveClaudeBinary.ts` — locates the `claude` binary for `node-pty.spawn`
+- `scripts/hook_forwarder.cjs` — bidirectional hook forwarder (stdin → HTTP → stdout decision)
+- `scripts/__tests__/verify-pretooluse-hook.cjs` — hook deny verification
+- `scripts/__tests__/verify-pretooluse-modify.cjs` — hook `updatedInput` (parameter rewrite) verification
+- `scripts/__tests__/verify-pty-e2e.cjs` — end-to-end SessionStart→PreToolUse→Stop→jsonl verification
+
+Files extended (still backwards-compatible with SDK path):
+- `src/claude/utils/generateHookSettings.ts` — new `profile: 'session-only' | 'full'`
+- `src/claude/utils/startHookServer.ts` — new optional `onPreToolUse / onPostToolUse / onUserPromptSubmit / onStop / onNotification` handlers, plus `setHandlers()` for live-swap
+- `src/claude/loop.ts` — new `remoteImpl: 'pty' | 'sdk'` option; PTY default
+- `src/claude/runClaude.ts` — picks driver from env; full hook profile when PTY
+- `package.json` — `node-pty@1.0.0` (pinned: 1.1.0 fails posix_spawnp on Node ≥ 22)
+
 ## Code Style Preferences
 
 ### TypeScript Conventions

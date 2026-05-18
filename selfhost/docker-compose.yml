@@ -1,0 +1,71 @@
+# happy-server 自托管部署 (standalone 模式 + nginx HTTPS 反代)
+# 对外地址：https://open-1.kfafa.cn:33333
+#
+# 数据全部落在 named volume `happy-data` 里：
+#   - /data/pglite/   嵌入式 Postgres 数据
+#   - /data/files/    上传的头像、附件等
+#
+# 启动：docker compose up -d --build
+# 停止：docker compose down
+# 看日志：docker compose logs -f happy-server
+
+services:
+  happy-server:
+    # 镜像由 Gitea Actions (.gitea/workflows/release-happy-server.yml) 构建并推送
+    # 升级版本：在 .env 改 HAPPY_SERVER_TAG=v0.2.0 然后 docker compose pull && up -d
+    image: open-1.kfafa.cn:30011/claude-relay/happy-server:${HAPPY_SERVER_TAG:-latest}
+    pull_policy: always
+    container_name: happy-server
+    restart: unless-stopped
+    environment:
+      # 唯一必需的密钥（在 .env 里填）
+      HANDY_MASTER_SECRET: ${HANDY_MASTER_SECRET}
+      # 服务端内部端口（不直接对外，nginx 反代到这里）
+      PORT: "3005"
+      HOST: "0.0.0.0"
+      # PGlite + 本地文件存储
+      DB_PROVIDER: "pglite"
+      DATA_DIR: "/data"
+      PGLITE_DIR: "/data/pglite"
+      # 关闭独立指标端口（避免与 nginx 冲突，也省事）
+      METRICS_ENABLED: "false"
+      NODE_ENV: "production"
+    volumes:
+      - happy-data:/data
+    # 覆盖默认 CMD（默认跑完整模式 main.ts，需要外部 PG/Redis）
+    # 这里改成 standalone：先迁移 PGlite，再启动服务
+    # 用 pnpm exec tsx 直接拉起 standalone.ts，避免依赖 npm script 的参数转义
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        pnpm --filter happy-server exec tsx ./sources/standalone.ts migrate
+        exec pnpm --filter happy-server exec tsx ./sources/standalone.ts serve
+    expose:
+      - "3005"
+    networks:
+      - happy
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: happy-nginx
+    restart: unless-stopped
+    depends_on:
+      - happy-server
+    # 宿主 33333 -> 容器内 nginx 33333 (HTTPS)
+    ports:
+      - "33333:33333"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # 证书目录（只读挂载）
+      - /home/sunflowerfa/cert:/etc/nginx/certs:ro
+    networks:
+      - happy
+
+volumes:
+  happy-data:
+
+networks:
+  happy:
+    driver: bridge

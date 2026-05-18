@@ -1,0 +1,327 @@
+# Gitea Actions — Release happy-app (Web Docker + Android APK)
+#
+# Trigger: push a tag of the form `happy-app-vX.Y.Z`.
+#
+# Outputs:
+#   - Docker image (Web): open-1.kfafa.cn:30011/claude-relay/happy-app:{vX.Y.Z, latest, sha-...}
+#     Multi-arch linux/amd64 + linux/arm64
+#   - Android APK: happy-app-X.Y.Z-android.apk attached to the Gitea Release
+#   - Static Web bundle: happy-app-X.Y.Z-web.tar.gz attached to the Gitea Release
+#
+# Secrets:
+#   - DOCKER_REGISTRY_USER, DOCKER_REGISTRY_PASSWORD : registry creds
+#   - RELEASE_TOKEN          : Gitea PAT for Release upload
+#   - ANDROID_KEYSTORE_BASE64    (optional) : base64-encoded JKS keystore for signing release APK
+#   - ANDROID_KEYSTORE_PASSWORD  (optional) : keystore password
+#   - ANDROID_KEY_ALIAS          (optional) : key alias
+#   - ANDROID_KEY_PASSWORD       (optional) : key password
+#   If the four ANDROID_* secrets are absent, the APK is built unsigned (debug
+#   keystore). Useful for internal testing but not for Play Store.
+
+name: Release happy-app
+
+on:
+  push:
+    tags:
+      - "happy-app-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (without the v prefix)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-happy-app-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: open-1.kfafa.cn:30011
+  IMAGE_PATH: claude-relay/happy-app
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Derive version + tag (single source of truth shared with later jobs).
+  # ---------------------------------------------------------------------------
+  prepare:
+    runs-on: test
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+      tag: ${{ steps.derive.outputs.tag }}
+    steps:
+      - name: Derive version
+        id: derive
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            TAG="happy-app-v${VERSION}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#happy-app-v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # 2. Docker image (Web bundle behind nginx — see Dockerfile.webapp)
+  # ---------------------------------------------------------------------------
+  docker-web:
+    needs: prepare
+    runs-on: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_REGISTRY_USER }}
+          password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+
+      - name: Build & push happy-app web image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.webapp
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PATH }}:v${{ needs.prepare.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PATH }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PATH }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.title=happy-app-web
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=happy-app-web
+          cache-to: type=gha,scope=happy-app-web,mode=max
+
+      - name: Export web static bundle tarball
+        # Pulls the just-pushed image, extracts the /usr/share/nginx/html
+        # static bundle, tars it up, and attaches it as a Release asset for
+        # users who want to host the SPA on their own CDN / web server.
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.prepare.outputs.version }}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_PATH }}:v${VERSION}"
+          docker pull --platform linux/amd64 "$IMAGE"
+          CID=$(docker create --platform linux/amd64 "$IMAGE")
+          # Heuristic: copy the document root. Adjust if your Dockerfile.webapp
+          # uses a different path. We tolerate both /usr/share/nginx/html and
+          # /app/dist (common Vite-on-nginx layouts).
+          mkdir -p web-bundle
+          docker cp "${CID}:/usr/share/nginx/html" web-bundle/static \
+            || docker cp "${CID}:/app/dist" web-bundle/static \
+            || (echo "Could not locate web bundle path inside image" >&2; exit 1)
+          docker rm "$CID"
+          tar -czf "happy-app-${VERSION}-web.tar.gz" -C web-bundle static
+
+      - name: Upload web bundle artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: web-bundle
+          path: happy-app-${{ needs.prepare.outputs.version }}-web.tar.gz
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 3. Android APK via expo prebuild + gradle assembleRelease.
+  # ---------------------------------------------------------------------------
+  android-apk:
+    needs: prepare
+    runs-on: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Java 17 (required by AGP / Expo SDK 55)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+
+      - name: Install workspace deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Expo prebuild (Android only)
+        working-directory: packages/happy-app
+        env:
+          APP_ENV: production
+          CI: "1"
+        run: |
+          # `expo prebuild --platform android` generates the native android/
+          # project on the fly so we don't have to commit it.
+          pnpm exec expo prebuild --platform android --non-interactive --no-install
+
+      - name: Decode signing keystore (if provided)
+        id: keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d \
+              > packages/happy-app/android/app/release.keystore
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No ANDROID_KEYSTORE_BASE64 secret — APK will be built unsigned (debug keystore)."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure gradle signing (if signed)
+        if: steps.keystore.outputs.signed == 'true'
+        working-directory: packages/happy-app/android
+        env:
+          KS_PWD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PWD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        # Expo's prebuild template (SDK 53+) already wires
+        #   release { signingConfig signingConfigs.release ... }
+        # in app/build.gradle and reads MYAPP_RELEASE_* from gradle.properties.
+        # So we only need to deliver the values — no patching required.
+        run: |
+          set -euo pipefail
+          {
+            echo ""
+            echo "MYAPP_RELEASE_STORE_FILE=release.keystore"
+            echo "MYAPP_RELEASE_STORE_PASSWORD=${KS_PWD}"
+            echo "MYAPP_RELEASE_KEY_ALIAS=${KEY_ALIAS}"
+            echo "MYAPP_RELEASE_KEY_PASSWORD=${KEY_PWD}"
+          } >> gradle.properties
+          # Safety check: confirm app/build.gradle actually references these
+          # properties. If it doesn't, the APK will be unsigned even though
+          # the keystore was provided — fail loud rather than silent.
+          if ! grep -q "MYAPP_RELEASE_STORE_FILE" app/build.gradle; then
+            echo "ERROR: app/build.gradle does not reference MYAPP_RELEASE_STORE_FILE." >&2
+            echo "       Your Expo template may not auto-wire the release signingConfig." >&2
+            echo "       Add a signingConfigs.release block referencing those props," >&2
+            echo "       and a signingConfig in the release buildType, then retry." >&2
+            exit 1
+          fi
+
+      - name: Build release APK
+        working-directory: packages/happy-app/android
+        env:
+          APP_ENV: production
+          GRADLE_OPTS: "-Xmx4g -Dorg.gradle.daemon=false"
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Locate APK
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.prepare.outputs.version }}"
+          APK=$(find packages/happy-app/android/app/build/outputs/apk/release -name "*.apk" | head -n1)
+          if [ -z "$APK" ]; then
+            echo "No APK was produced." >&2
+            exit 1
+          fi
+          DEST="happy-app-${VERSION}-android.apk"
+          cp "$APK" "$DEST"
+          ls -la "$DEST"
+          echo "path=${DEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: android-apk
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 4. Publish single Gitea Release with web bundle + APK attached.
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: [prepare, docker-web, android-apk]
+    runs-on: test
+    steps:
+      - name: Checkout (for changelog)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Flatten
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.apk' \) -exec mv {} assets/ \;
+          ls -la assets/
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.prepare.outputs.tag }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
+          PREV=$(git tag --list 'happy-app-v*' --sort=-v:refname \
+                 | grep -v "^${TAG}$" | head -n1 || true)
+          {
+            echo "# happy-app ${VERSION}"
+            echo ""
+            echo "## Web (Docker)"
+            echo ""
+            echo '```bash'
+            echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_PATH }}:v${VERSION}"
+            echo '```'
+            echo ""
+            echo "Platforms: linux/amd64, linux/arm64. Static bundle is also attached as \`happy-app-${VERSION}-web.tar.gz\`."
+            echo ""
+            echo "## Android"
+            echo ""
+            echo "APK attached: \`happy-app-${VERSION}-android.apk\`."
+            echo ""
+            if [ -n "$PREV" ]; then
+              echo "## Changes since ${PREV}"
+              echo ""
+              git log "${PREV}..${TAG}" \
+                --pretty=format:"- %s (%h)" \
+                -- packages/happy-app Dockerfile.webapp || true
+            else
+              echo "First release."
+            fi
+          } > NOTES.md
+
+      - name: Create Gitea Release
+        uses: https://gitea.com/actions/release-action@main
+        with:
+          api_key: ${{ secrets.RELEASE_TOKEN }}
+          name: "${{ needs.prepare.outputs.tag }}"
+          tag_name: "${{ needs.prepare.outputs.tag }}"
+          body_path: NOTES.md
+          files: |-
+            assets/*

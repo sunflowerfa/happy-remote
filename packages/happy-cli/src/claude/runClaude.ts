@@ -378,8 +378,22 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     });
     logger.debug(`[START] Hook server started on port ${hookServer.port}`);
 
-    // Generate hook settings file for Claude
-    const hookSettingsPath = generateHookSettingsFile(hookServer.port);
+    // Pick remote driver. PTY (default) avoids the Agent-SDK programmatic-
+    // usage credit pool (live 2026-06-15) by spawning the interactive
+    // `claude` binary under node-pty. SDK is kept as an opt-in escape
+    // hatch — set HAPPY_CLAUDE_REMOTE_IMPL=sdk to use it.
+    const remoteImpl: 'pty' | 'sdk' =
+        process.env.HAPPY_CLAUDE_REMOTE_IMPL === 'sdk' ? 'sdk' : 'pty';
+    logger.debug(`[START] Remote driver: ${remoteImpl}`);
+
+    // Generate hook settings file for Claude. PTY mode needs the full hook
+    // profile (PreToolUse / Stop / etc) so happy-cli can intercept tool calls
+    // and detect turn completion without the SDK. SDK mode only needs
+    // SessionStart, just like before.
+    const hookSettingsPath = generateHookSettingsFile(
+        hookServer.port,
+        remoteImpl === 'pty' ? 'full' : 'session-only',
+    );
     logger.debug(`[START] Generated hook settings file: ${hookSettingsPath}`);
 
     // Print log file path
@@ -752,6 +766,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         startingMode: options.startingMode,
         messageQueue,
         api,
+        remoteImpl,
+        hookServer,
         allowedTools: happyServer.toolNames.map(toolName => `mcp__happy__${toolName}`),
         onModeChange: (newMode) => {
             currentRunMode = newMode;

@@ -1,0 +1,316 @@
+# Gitea Actions — Release happy-cli
+#
+# Trigger: push a tag of the form `happy-cli-vX.Y.Z` (matches the existing
+# happy-agent release tagging scheme).
+#
+# Artifacts published to the Gitea Release:
+#   1. Source npm tarball (one)        — happy-X.Y.Z.tgz
+#      For users running `npm i <URL>` or installing from the Gitea npm
+#      registry mirror. Native deps (node-pty) are NOT prebuilt; the
+#      user's machine will compile them at install time.
+#
+#   2. Standalone bundles (five)       — happy-cli-X.Y.Z-<os>-<arch>.tar.gz
+#      Each contains dist/ + bin/ + node_modules/ + package.json with
+#      node-pty already compiled for that platform. Users untar and run
+#      `./bin/happy.mjs` directly — no `npm install` required.
+#
+#   3. Source code archive             — happy-cli-X.Y.Z-source.tar.gz
+#      Plain `git archive` for audit / fork purposes.
+#
+# Secrets required:
+#   - RELEASE_TOKEN          : Gitea PAT with `write:repository` scope used
+#                              to create the Release and upload assets.
+
+name: Release happy-cli
+
+on:
+  push:
+    tags:
+      - "happy-cli-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (without the v prefix)"
+        required: true
+        type: string
+
+# Avoid two concurrent releases of the same tag stepping on each other's
+# Release object.
+concurrency:
+  group: release-happy-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PACKAGE: happy-cli
+  PACKAGE_NAME: happy
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Resolve version and create (or reuse) the Gitea Release once, so all
+  #    matrix jobs upload to the same Release object.
+  # ---------------------------------------------------------------------------
+  prepare:
+    runs-on: test
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+      tag: ${{ steps.derive.outputs.tag }}
+    steps:
+      - name: Derive version
+        id: derive
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            TAG="happy-cli-v${VERSION}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#happy-cli-v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${TAG} (version=${VERSION})"
+
+  # ---------------------------------------------------------------------------
+  # 2. Per-platform standalone bundles. node-pty is recompiled inside each
+  #    matrix runner so the resulting tarball ships a working native binary.
+  # ---------------------------------------------------------------------------
+  bundle:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, os: linux,   arch: x64,   archive: tar }
+          - { runner: ubuntu-24.04-arm, os: linux, arch: arm64, archive: tar }
+          - { runner: macos-13,      os: macos,   arch: x64,   archive: tar }
+          - { runner: macos-14,      os: macos,   arch: arm64, archive: tar }
+          - { runner: windows-latest, os: windows, arch: x64,  archive: zip }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install workspace deps (compiles node-pty for this platform)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build happy-cli
+        run: pnpm --filter happy build
+
+      - name: Sanity-check that node-pty native binding exists
+        shell: bash
+        run: |
+          set -e
+          NATIVE=$(find packages/happy-cli/node_modules/node-pty -name "*.node" -print -quit || true)
+          if [ -z "$NATIVE" ]; then
+            echo "ERROR: node-pty native binding not built — bundle would be broken."
+            ls -la packages/happy-cli/node_modules/node-pty/build/Release/ || true
+            exit 1
+          fi
+          echo "Found native binding: $NATIVE"
+
+      - name: Stage standalone bundle (Unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.prepare.outputs.version }}"
+          STAGE="happy-cli-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "dist-release/${STAGE}"
+          # Ship only what's needed at runtime.
+          cp -R packages/happy-cli/dist            "dist-release/${STAGE}/dist"
+          cp -R packages/happy-cli/bin             "dist-release/${STAGE}/bin"
+          cp -R packages/happy-cli/scripts         "dist-release/${STAGE}/scripts"
+          cp -R packages/happy-cli/tools           "dist-release/${STAGE}/tools" 2>/dev/null || true
+          cp     packages/happy-cli/package.json   "dist-release/${STAGE}/package.json"
+          cp     packages/happy-cli/README.md      "dist-release/${STAGE}/README.md" 2>/dev/null || true
+          cp     LICENSE                            "dist-release/${STAGE}/LICENSE" 2>/dev/null || true
+          # Vendor node_modules so the bundle is install-free.
+          mkdir -p "dist-release/${STAGE}/node_modules"
+          # Use pnpm to produce a fully resolved node_modules tree for happy-cli
+          # alone, then copy it in. Avoids ferrying the whole monorepo install.
+          # We deliberately use --node-linker=hoisted to make the resulting tree
+          # look like a classic npm install (no .pnpm/ folder), so the bundle
+          # is directly runnable with `node ./bin/happy.mjs`.
+          pnpm --filter happy deploy --prod --node-linker=hoisted "dist-release/${STAGE}-deploy"
+          cp -R "dist-release/${STAGE}-deploy/node_modules" "dist-release/${STAGE}/"
+          rm -rf "dist-release/${STAGE}-deploy"
+          # Compress
+          tar -czf "happy-cli-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" \
+              -C dist-release "${STAGE}"
+          ls -la "happy-cli-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
+
+      - name: Stage standalone bundle (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $VERSION = "${{ needs.prepare.outputs.version }}"
+          $STAGE = "happy-cli-$VERSION-windows-x64"
+          New-Item -ItemType Directory -Path "dist-release\$STAGE" -Force | Out-Null
+          Copy-Item -Recurse packages\happy-cli\dist     "dist-release\$STAGE\dist"
+          Copy-Item -Recurse packages\happy-cli\bin      "dist-release\$STAGE\bin"
+          Copy-Item -Recurse packages\happy-cli\scripts  "dist-release\$STAGE\scripts"
+          if (Test-Path packages\happy-cli\tools) {
+            Copy-Item -Recurse packages\happy-cli\tools  "dist-release\$STAGE\tools"
+          }
+          Copy-Item packages\happy-cli\package.json      "dist-release\$STAGE\package.json"
+          if (Test-Path packages\happy-cli\README.md) {
+            Copy-Item packages\happy-cli\README.md       "dist-release\$STAGE\README.md"
+          }
+          if (Test-Path LICENSE) {
+            Copy-Item LICENSE                            "dist-release\$STAGE\LICENSE"
+          }
+          pnpm --filter happy deploy --prod --node-linker=hoisted "dist-release\$STAGE-deploy"
+          Copy-Item -Recurse "dist-release\$STAGE-deploy\node_modules" "dist-release\$STAGE\node_modules"
+          Remove-Item -Recurse -Force "dist-release\$STAGE-deploy"
+          Compress-Archive -Path "dist-release\$STAGE\*" -DestinationPath "happy-cli-$VERSION-windows-x64.zip"
+          Get-Item "happy-cli-$VERSION-windows-x64.zip"
+
+      - name: Upload artifact (Unix)
+        if: matrix.os != 'windows'
+        uses: actions/upload-artifact@v3
+        with:
+          name: bundle-${{ matrix.os }}-${{ matrix.arch }}
+          path: happy-cli-${{ needs.prepare.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+          retention-days: 7
+
+      - name: Upload artifact (Windows)
+        if: matrix.os == 'windows'
+        uses: actions/upload-artifact@v3
+        with:
+          name: bundle-windows-x64
+          path: happy-cli-${{ needs.prepare.outputs.version }}-windows-x64.zip
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 3. Source npm tarball (one, platform-independent) and source archive.
+  # ---------------------------------------------------------------------------
+  npm-tarball:
+    needs: prepare
+    runs-on: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm --filter happy build
+
+      - name: Pack
+        run: |
+          set -e
+          mkdir -p dist-release
+          pnpm --filter happy pack --pack-destination "$(pwd)/dist-release"
+          ls -la dist-release/
+
+      - name: Source archive
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          # git archive guarantees we only include tracked files (no node_modules,
+          # no local dirty state) which is the right thing for a "source" asset.
+          git archive --format=tar.gz \
+            --prefix="happy-cli-${VERSION}/" \
+            -o "dist-release/happy-cli-${VERSION}-source.tar.gz" HEAD -- packages/happy-cli
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: npm-and-source
+          path: dist-release/*
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 4. Publish a single Gitea Release with all assets attached.
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: [prepare, bundle, npm-tarball]
+    runs-on: test
+    steps:
+      - name: Checkout (for changelog)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: dist-release
+
+      - name: Flatten artifacts
+        run: |
+          set -e
+          mkdir -p assets
+          find dist-release -type f \( -name '*.tar.gz' -o -name '*.tgz' -o -name '*.zip' \) -exec mv {} assets/ \;
+          ls -la assets/
+
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.prepare.outputs.tag }}"
+          # Find the previous happy-cli tag for the diff range.
+          PREV=$(git tag --list 'happy-cli-v*' --sort=-v:refname \
+                 | grep -v "^${TAG}$" | head -n1 || true)
+          {
+            echo "# happy-cli ${{ needs.prepare.outputs.version }}"
+            echo ""
+            if [ -n "$PREV" ]; then
+              echo "## Changes since ${PREV}"
+              echo ""
+              git log "${PREV}..${TAG}" \
+                --pretty=format:"- %s (%h)" \
+                -- packages/happy-cli || true
+            else
+              echo "First release."
+            fi
+            echo ""
+            echo ""
+            echo "## Assets"
+            echo ""
+            echo "- **Standalone bundles** (vendored node_modules with prebuilt node-pty — just extract and run \`./bin/happy.mjs\`):"
+            echo "  - Linux x64 / arm64"
+            echo "  - macOS x64 / arm64"
+            echo "  - Windows x64"
+            echo "- **npm tarball** \`happy-*.tgz\` — for \`npm install <url>\` (your machine must support compiling node-pty)"
+            echo "- **Source archive** — \`git archive\` of \`packages/happy-cli\` for audit"
+          } > NOTES.md
+          cat NOTES.md
+
+      - name: Create Gitea Release
+        uses: https://gitea.com/actions/release-action@main
+        with:
+          api_key: ${{ secrets.RELEASE_TOKEN }}
+          name: "${{ needs.prepare.outputs.tag }}"
+          tag_name: "${{ needs.prepare.outputs.tag }}"
+          body_path: NOTES.md
+          files: |-
+            assets/*

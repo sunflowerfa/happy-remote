@@ -1,60 +1,30 @@
 /**
  * Dedicated HTTP server for receiving Claude session hooks
- * 
+ *
  * This server receives notifications from Claude when sessions change
- * (new session, resume, compact, fork, etc.) via the SessionStart hook.
- * 
+ * (new session, resume, compact, fork, etc.) via the SessionStart hook,
+ * AND — in PTY mode — receives every PreToolUse / PostToolUse / Stop /
+ * UserPromptSubmit / Notification event so happy-cli can fully replace
+ * what Agent SDK callbacks used to do.
+ *
  * Separate from the MCP server to keep concerns isolated.
- * 
- * ## Control Flow
- * 
- * ### Startup
- * ```
- * runClaude.ts                                  
- *     │                                         
- *     ├─► startHookServer() ──► HTTP server on random port (e.g., 52290)
- *     │                                         
- *     ├─► generateHookSettingsFile(port) ──► ~/.happy/tmp/hooks/session-hook-<pid>.json
- *     │   (contains SessionStart hook pointing to our server)
- *     │                                         
- *     └─► loop() ──► claudeLocal/claudeRemote
- *             │
- *             └─► spawn claude --settings <hook-settings-path>
- * ```
- * 
- * ### Session Notification Flow
- * ```
- * Claude CLI (SessionStart event)
- *     │
- *     ├─► Reads hooks from --settings file
- *     │
- *     └─► Executes hook command (session_hook_forwarder.cjs)
- *             │
- *             ├─► Receives session data on stdin
- *             │
- *             └─► HTTP POST to http://127.0.0.1:<port>/hook/session-start
- *                     │
- *                     └─► startHookServer receives it
- *                             │
- *                             └─► onSessionHook(sessionId, data)
- *                                     │
- *                                     ├─► Updates Session.sessionId
- *                                     ├─► Updates API metadata
- *                                     └─► Notifies SessionScanner
- * ```
- * 
- * ### Triggered By
- * - `happy` (fresh start) - new session created
- * - `happy --continue` - continues last session (may fork)
- * - `happy --resume` - interactive picker, then resume
- * - `happy --resume <id>` - resume specific session
- * - `/compact` command - compacts and forks session
- * - Double-escape fork - user forks conversation in CLI
- * 
- * ### Why Not Use File Watching?
- * File watching has race conditions when multiple Happy processes run.
- * With hooks, Claude directly tells THIS specific process about its session,
- * ensuring 1:1 mapping between Happy process and Claude session.
+ *
+ * ## Routes
+ * - POST /hook/session-start       SessionStart   (one-way, sessionId notify)
+ * - POST /hook/pre-tool-use        PreToolUse     (BIDIRECTIONAL — decides allow/deny/modify)
+ * - POST /hook/post-tool-use       PostToolUse    (informational)
+ * - POST /hook/user-prompt-submit  UserPromptSubmit (can rewrite/block user input)
+ * - POST /hook/stop                Stop           (assistant turn finished)
+ * - POST /hook/notification        Notification   (idle / waiting-for-input hints)
+ *
+ * Each route receives the raw JSON payload Claude wrote to the hook's stdin.
+ * For BIDIRECTIONAL routes, the response body is forwarded verbatim back to
+ * Claude as the hook's stdout — Claude then applies the decision.
+ *
+ * ## Response semantics (matches Claude Code's hook decision schema)
+ *   200 + JSON  → forward to Claude as-is (e.g. `{"hookSpecificOutput": {...}}`)
+ *   204         → no-op, Claude continues with default behavior
+ *   409 + text  → blocking error, body becomes user-visible reason
  */
 
 import { createServer, IncomingMessage, ServerResponse, Server } from 'node:http';
@@ -73,9 +43,76 @@ export interface SessionHookData {
     [key: string]: unknown;
 }
 
+/**
+ * Data received from PreToolUse / PostToolUse hooks
+ */
+export interface ToolHookData {
+    session_id?: string;
+    tool_name?: string;
+    tool_input?: Record<string, unknown>;
+    tool_response?: unknown;
+    tool_use_id?: string;
+    hook_event_name?: string;
+    transcript_path?: string;
+    cwd?: string;
+    [key: string]: unknown;
+}
+
+/**
+ * Data received from UserPromptSubmit hook
+ */
+export interface UserPromptHookData {
+    session_id?: string;
+    prompt?: string;
+    hook_event_name?: string;
+    transcript_path?: string;
+    cwd?: string;
+    [key: string]: unknown;
+}
+
+/**
+ * Data received from Stop / Notification hooks
+ */
+export interface GenericHookData {
+    session_id?: string;
+    hook_event_name?: string;
+    transcript_path?: string;
+    cwd?: string;
+    message?: string;
+    [key: string]: unknown;
+}
+
+/**
+ * Hook decision returned to Claude. Either a structured JSON body that
+ * Claude interprets (forwarded as stdout), or a blocking-error payload
+ * (HTTP 409 + reason text).
+ */
+export type HookDecision =
+    | { type: 'continue' } // 204 — no-op
+    | { type: 'json'; body: unknown } // 200 + JSON
+    | { type: 'block'; reason: string }; // 409 + plain text
+
 export interface HookServerOptions {
-    /** Called when a session hook is received with a valid session ID */
+    /** Called when SessionStart hook fires with a valid sessionId. */
     onSessionHook: (sessionId: string, data: SessionHookData) => void;
+
+    /**
+     * Called for every PreToolUse hook. Must return a decision.
+     * Default behavior when omitted: { type: 'continue' } (Claude proceeds).
+     */
+    onPreToolUse?: (data: ToolHookData) => Promise<HookDecision>;
+
+    /** Called for every PostToolUse hook (informational, decision is ignored). */
+    onPostToolUse?: (data: ToolHookData) => Promise<HookDecision>;
+
+    /** Called for every UserPromptSubmit hook. Can rewrite/block user prompt. */
+    onUserPromptSubmit?: (data: UserPromptHookData) => Promise<HookDecision>;
+
+    /** Called for every Stop hook — Claude finished its assistant turn. */
+    onStop?: (data: GenericHookData) => Promise<HookDecision>;
+
+    /** Called for every Notification hook — Claude is idle / waiting for input. */
+    onNotification?: (data: GenericHookData) => Promise<HookDecision>;
 }
 
 export interface HookServer {
@@ -83,87 +120,155 @@ export interface HookServer {
     port: number;
     /** Stop the server */
     stop: () => void;
+    /** Replace the active handler set (used when switching local↔remote modes) */
+    setHandlers: (next: Partial<HookServerOptions>) => void;
 }
 
+const ROUTE_TIMEOUT_MS: Record<string, number> = {
+    '/hook/session-start': 5_000,
+    '/hook/pre-tool-use': 605_000, // 600s for hook + 5s slack
+    '/hook/post-tool-use': 35_000,
+    '/hook/user-prompt-submit': 35_000,
+    '/hook/stop': 35_000,
+    '/hook/notification': 35_000,
+};
+
 /**
- * Start a dedicated HTTP server for receiving Claude session hooks
- * 
- * @param options - Server options including the session hook callback
- * @returns Promise resolving to the server instance with port info
+ * Start a dedicated HTTP server for receiving Claude hooks
  */
 export async function startHookServer(options: HookServerOptions): Promise<HookServer> {
-    const { onSessionHook } = options;
+    // Mutable handler ref so caller can swap callbacks per-mode without restarting.
+    let handlers: HookServerOptions = { ...options };
 
-    return new Promise((resolve, reject) => {
-        const server: Server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-            // Only handle POST to /hook/session-start
-            if (req.method === 'POST' && req.url === '/hook/session-start') {
-                // Set timeout to prevent hanging if Claude doesn't close stdin
-                const timeout = setTimeout(() => {
-                    if (!res.headersSent) {
-                        logger.debug('[hookServer] Request timeout');
-                        res.writeHead(408).end('timeout');
-                    }
-                }, 5000);
+    async function readBody(req: IncomingMessage, timeoutMs: number): Promise<Buffer> {
+        return new Promise((resolve, reject) => {
+            const chunks: Buffer[] = [];
+            const timer = setTimeout(() => {
+                reject(new Error('request body timeout'));
+            }, timeoutMs);
+            req.on('data', (c: Buffer) => chunks.push(c));
+            req.on('end', () => {
+                clearTimeout(timer);
+                resolve(Buffer.concat(chunks));
+            });
+            req.on('error', (err) => {
+                clearTimeout(timer);
+                reject(err);
+            });
+        });
+    }
 
-                try {
-                    const chunks: Buffer[] = [];
-                    for await (const chunk of req) {
-                        chunks.push(chunk as Buffer);
-                    }
-                    clearTimeout(timeout);
-                    
-                    const body = Buffer.concat(chunks).toString('utf-8');
-                    logger.debug('[hookServer] Received session hook:', body);
+    function safeParseJson<T>(buf: Buffer): T | null {
+        try {
+            return JSON.parse(buf.toString('utf-8')) as T;
+        } catch {
+            return null;
+        }
+    }
 
-                    let data: SessionHookData = {};
-                    try {
-                        data = JSON.parse(body);
-                    } catch (parseError) {
-                        logger.debug('[hookServer] Failed to parse hook data as JSON:', parseError);
-                    }
+    function writeDecision(res: ServerResponse, decision: HookDecision): void {
+        if (decision.type === 'continue') {
+            res.writeHead(204).end();
+            return;
+        }
+        if (decision.type === 'json') {
+            res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(decision.body));
+            return;
+        }
+        // block
+        res.writeHead(409, { 'Content-Type': 'text/plain' }).end(decision.reason);
+    }
 
-                    // Support both snake_case (from Claude) and camelCase
-                    const sessionId = data.session_id || data.sessionId;
-                    if (sessionId) {
-                        logger.debug(`[hookServer] Session hook received session ID: ${sessionId}`);
-                        onSessionHook(sessionId, data);
-                    } else {
-                        logger.debug('[hookServer] Session hook received but no session_id found in data');
-                    }
+    async function handleSessionStart(req: IncomingMessage, res: ServerResponse): Promise<void> {
+        try {
+            const body = await readBody(req, ROUTE_TIMEOUT_MS['/hook/session-start']);
+            const data = safeParseJson<SessionHookData>(body) ?? {};
+            const sessionId = data.session_id || data.sessionId;
+            if (sessionId) {
+                logger.debug(`[hookServer] SessionStart sessionId=${sessionId}`);
+                handlers.onSessionHook(sessionId, data);
+            } else {
+                logger.debug('[hookServer] SessionStart with no session_id');
+            }
+            res.writeHead(200, { 'Content-Type': 'text/plain' }).end('ok');
+        } catch (err) {
+            logger.debug('[hookServer] SessionStart error:', err);
+            if (!res.headersSent) res.writeHead(500).end('error');
+        }
+    }
 
-                    res.writeHead(200, { 'Content-Type': 'text/plain' }).end('ok');
-                } catch (error) {
-                    clearTimeout(timeout);
-                    logger.debug('[hookServer] Error handling session hook:', error);
-                    if (!res.headersSent) {
-                        res.writeHead(500).end('error');
-                    }
-                }
+    async function handleBidirectional<T>(
+        req: IncomingMessage,
+        res: ServerResponse,
+        routePath: string,
+        callback: ((data: T) => Promise<HookDecision>) | undefined,
+    ): Promise<void> {
+        try {
+            const body = await readBody(req, ROUTE_TIMEOUT_MS[routePath] ?? 30_000);
+            const data = safeParseJson<T>(body);
+            if (!data || !callback) {
+                writeDecision(res, { type: 'continue' });
                 return;
             }
+            const decision = await callback(data);
+            writeDecision(res, decision);
+        } catch (err) {
+            logger.debug(`[hookServer] ${routePath} error:`, err);
+            if (!res.headersSent) {
+                // On callback failure, do NOT block — let Claude continue.
+                writeDecision(res, { type: 'continue' });
+            }
+        }
+    }
 
-            // 404 for anything else
-            res.writeHead(404).end('not found');
+    return new Promise((resolve, reject) => {
+        const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
+            if (req.method !== 'POST') {
+                res.writeHead(404).end('not found');
+                return;
+            }
+            switch (req.url) {
+                case '/hook/session-start':
+                    handleSessionStart(req, res);
+                    return;
+                case '/hook/pre-tool-use':
+                    handleBidirectional<ToolHookData>(req, res, req.url, handlers.onPreToolUse);
+                    return;
+                case '/hook/post-tool-use':
+                    handleBidirectional<ToolHookData>(req, res, req.url, handlers.onPostToolUse);
+                    return;
+                case '/hook/user-prompt-submit':
+                    handleBidirectional<UserPromptHookData>(req, res, req.url, handlers.onUserPromptSubmit);
+                    return;
+                case '/hook/stop':
+                    handleBidirectional<GenericHookData>(req, res, req.url, handlers.onStop);
+                    return;
+                case '/hook/notification':
+                    handleBidirectional<GenericHookData>(req, res, req.url, handlers.onNotification);
+                    return;
+                default:
+                    res.writeHead(404).end('not found');
+            }
         });
 
-        // Listen on random available port
         server.listen(0, '127.0.0.1', () => {
             const address = server.address();
             if (!address || typeof address === 'string') {
                 reject(new Error('Failed to get server address'));
                 return;
             }
-
             const port = address.port;
             logger.debug(`[hookServer] Started on port ${port}`);
-
             resolve({
                 port,
                 stop: () => {
                     server.close();
                     logger.debug('[hookServer] Stopped');
-                }
+                },
+                setHandlers: (next) => {
+                    handlers = { ...handlers, ...next };
+                    logger.debug(`[hookServer] Handlers updated (keys: ${Object.keys(next).join(',')})`);
+                },
             });
         });
 
@@ -173,4 +278,3 @@ export async function startHookServer(options: HookServerOptions): Promise<HookS
         });
     });
 }
-

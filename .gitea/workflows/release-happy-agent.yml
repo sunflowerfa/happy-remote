@@ -1,0 +1,113 @@
+# Gitea Actions — Release happy-agent
+#
+# Trigger: push a tag of the form `happy-agent-vX.Y.Z`.
+# happy-agent is pure JS (no native deps) so a single npm tarball serves all
+# platforms.
+#
+# Artifacts:
+#   - happy-agent-X.Y.Z.tgz           — npm pack output
+#   - happy-agent-X.Y.Z-source.tar.gz — git archive of packages/happy-agent
+
+name: Release happy-agent
+
+on:
+  push:
+    tags:
+      - "happy-agent-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (without the v prefix)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-happy-agent-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: test
+    steps:
+      - name: Derive version
+        id: derive
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            TAG="happy-agent-v${VERSION}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#happy-agent-v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install workspace deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build happy-agent
+        run: pnpm --filter happy-agent build
+
+      - name: Pack
+        run: |
+          set -e
+          mkdir -p dist-release
+          pnpm --filter happy-agent pack --pack-destination "$(pwd)/dist-release"
+
+      - name: Source archive
+        run: |
+          VERSION="${{ steps.derive.outputs.version }}"
+          git archive --format=tar.gz \
+            --prefix="happy-agent-${VERSION}/" \
+            -o "dist-release/happy-agent-${VERSION}-source.tar.gz" \
+            HEAD -- packages/happy-agent
+
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.derive.outputs.tag }}"
+          PREV=$(git tag --list 'happy-agent-v*' --sort=-v:refname \
+                 | grep -v "^${TAG}$" | head -n1 || true)
+          {
+            echo "# happy-agent ${{ steps.derive.outputs.version }}"
+            echo ""
+            if [ -n "$PREV" ]; then
+              echo "## Changes since ${PREV}"
+              echo ""
+              git log "${PREV}..${TAG}" \
+                --pretty=format:"- %s (%h)" \
+                -- packages/happy-agent || true
+            else
+              echo "First release."
+            fi
+          } > NOTES.md
+
+      - name: Create Gitea Release
+        uses: https://gitea.com/actions/release-action@main
+        with:
+          api_key: ${{ secrets.RELEASE_TOKEN }}
+          name: "${{ steps.derive.outputs.tag }}"
+          tag_name: "${{ steps.derive.outputs.tag }}"
+          body_path: NOTES.md
+          files: |-
+            dist-release/*
