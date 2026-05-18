@@ -44,8 +44,6 @@ services:
         exec pnpm --filter happy-server exec tsx ./sources/standalone.ts serve
     expose:
       - "3005"
-    networks:
-      - happy
 
   nginx:
     image: nginx:1.27-alpine
@@ -60,12 +58,9 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       # 证书目录（只读挂载）
       - /home/sunflowerfa/cert:/etc/nginx/certs:ro
-    networks:
-      - happy
 
+# 不显式声明 networks —— Docker Compose 自动为本 project 创建 default network，
+# 同 project 下 service 互相通过 container_name / service_name 解析（happy-server, nginx）。
+# 之前显式声明在 1Panel 解析器下会报 "networks must be a mapping"（疑似缩进/解析差异）。
 volumes:
   happy-data:
-
-networks:
-  happy:
-    driver: bridge

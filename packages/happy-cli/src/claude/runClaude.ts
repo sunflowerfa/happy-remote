@@ -323,6 +323,22 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         sessionId: initialScannerSessionId,
         workingDirectory,
         onMessage: (raw) => {
+            // PTY mode: claudeRemotePtyLauncher already owns the JSONL
+            // scanner (it has to — that's the only place we get the
+            // assistant + tool_result stream from `claude`). This
+            // remoteScanner was designed for SDK mode, where the SDK
+            // pipeline emits messages and the scanner only fills in
+            // user-typed prompts that arrived from a sibling
+            // `claude --resume` terminal. In PTY mode, leaving this
+            // callback active double-forwards every JSONL row to the
+            // app (each row gets sent once by the launcher's scanner
+            // and once again here), making the app display every
+            // message — user and assistant alike — twice.
+            if (process.env.HAPPY_CLAUDE_REMOTE_IMPL !== 'sdk') {
+                logger.debug(`[remoteScanner] skip (PTY mode) type=${raw.type} uuid=${(raw as any).uuid ?? (raw as any).leafUuid ?? '?'}`);
+                return;
+            }
+
             // Only user-typed prompts. SDK pipeline owns assistant and
             // tool_result-bearing user messages.
             if (raw.type !== 'user') return;

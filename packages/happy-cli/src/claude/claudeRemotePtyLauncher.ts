@@ -115,12 +115,29 @@ export async function claudeRemotePtyLauncher(deps: ClaudeRemotePtyLauncherDeps)
 
     // SessionScanner: this is the only place we get the assistant + tool_result
     // stream from claude in PTY mode. Mirror to the app via sendClaudeSessionMessage.
+    //
+    // De-dup rule for user-role rows:
+    //   The mobile App optimistically renders a user text message the moment
+    //   it sends it over Socket.IO. claude then echoes the same text into
+    //   the jsonl as a `type:"user"` row, which sessionScanner picks up.
+    //   Forwarding that row would make the App display the same message
+    //   twice. So: skip `type:"user"` rows whose content is plain text /
+    //   string, but KEEP rows whose content is `tool_result` blocks —
+    //   tool_result rides on the user role and the App needs them to
+    //   render tool output.
     const initialSessionId = session.sessionId;
     const scanner = await createSessionScanner({
         sessionId: initialSessionId,
         workingDirectory: session.path,
         onMessage: (raw) => {
             if (raw.type === 'summary') return; // suppress upstream "summary" — we generate our own
+            if (raw.type === 'user') {
+                const content = (raw as { message?: { content?: unknown } }).message?.content;
+                const isToolResultRow = Array.isArray(content)
+                    && content.length > 0
+                    && content.every((c: unknown) => (c as { type?: string })?.type === 'tool_result');
+                if (!isToolResultRow) return; // App already rendered this user text optimistically
+            }
             session.client.sendClaudeSessionMessage(raw);
         },
     });
