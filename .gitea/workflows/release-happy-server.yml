@@ -137,9 +137,25 @@ jobs:
           } > NOTES.md
 
       - name: Create Gitea Release (metadata only — image lives in registry)
-        uses: https://gitea.com/actions/release-action@main
-        with:
-          api_key: ${{ secrets.RELEASE_TOKEN }}
-          name: "${{ steps.derive.outputs.tag }}"
-          tag_name: "${{ steps.derive.outputs.tag }}"
-          body_path: NOTES.md
+        # 不用 https://gitea.com/actions/release-action（go-based 二进制，
+        # act_runner 默认容器里没装 go，会报 "go: executable file not found"）。
+        # 直接调 Gitea API：POST /api/v1/repos/{owner}/{repo}/releases
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITEA_API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases
+          TAG: ${{ steps.derive.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 构造 JSON payload：jq 优先，缺则 python3 fallback
+          if command -v jq >/dev/null 2>&1; then
+            jq -n --arg tag "$TAG" --rawfile body NOTES.md \
+              '{tag_name: $tag, name: $tag, body: $body}' > payload.json
+          else
+            python3 -c 'import json, os, pathlib; pathlib.Path("payload.json").write_text(json.dumps({"tag_name": os.environ["TAG"], "name": os.environ["TAG"], "body": pathlib.Path("NOTES.md").read_text()}))'
+          fi
+          curl -fsSL -X POST \
+            -H "Authorization: token ${RELEASE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d @payload.json \
+            "${GITEA_API}"
