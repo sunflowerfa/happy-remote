@@ -51,7 +51,13 @@ detect_platform() {
         Darwin)
             case "$ARCH" in
                 arm64|aarch64) PLATFORM="macos-arm64"; ARCHIVE_EXT="tar.gz" ;;
-                x86_64)        PLATFORM="macos-x64";   ARCHIVE_EXT="tar.gz" ;;
+                x86_64)
+                    # GitHub Free tier macos-13 (Intel) runner 等待时间极不稳定且即将被
+                    # GitHub retire，目前不发布 macos-x64 bundle。Intel Mac 用户走 Rosetta 跑
+                    # arm64 bundle 也不行（Rosetta 只让 Intel 跑 ... 等等其实 Rosetta 是反过来）。
+                    # 临时建议 Intel Mac 用户用 Node 自己 npm install (会本地编译 node-pty)。
+                    die "暂未发布 Intel Mac (x86_64) bundle。 Apple Silicon (M 系列) 请正常用此脚本；Intel Mac 临时方案：本机装 Node 20+ 后跑 \`npm install -g https://github.com/sunflowerfa/happy-remote/raw/main/packages/happy-cli\`（会本地编译 node-pty）。"
+                    ;;
                 *) die "不支持的 macOS 架构：$ARCH" ;;
             esac
             ;;
