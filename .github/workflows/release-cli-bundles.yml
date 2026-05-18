@@ -1,16 +1,16 @@
 # GitHub Actions — happy-cli multi-platform bundle build farm
 #
-# 借用 GitHub 免费提供的 macOS / Windows / Linux runner 编译 node-pty
-# native binding 并打包 standalone bundle，构建产物推送回你的 Gitea Release。
+# 借用 GitHub 免费 macOS / Windows / Linux runner 编译 node-pty 并打包
+# standalone bundle，产物直接发布到 GitHub Release。
 #
 # 触发：
 #   - push tag `happy-cli-v*`（推荐：`git push github happy-cli-v1.1.10-beta.4`）
 #   - workflow_dispatch（GitHub Actions UI 手动触发，输入 version）
 #
-# 需要在 GitHub 仓库 Settings → Secrets and Variables → Actions 配置：
-#   GITEA_TOKEN   你的 Gitea PAT，scope: write:repository, write:package
+# 不需要任何 secret —— GitHub 自动注入 GITHUB_TOKEN，对当前仓库有 write 权限
+# 用来创建 Release 和上传 asset。
 #
-# 产物：上传到 Gitea Release 的 4 个 tarball：
+# 产物（上传到 https://github.com/sunflowerfa/happy-remote/releases/tag/<tag>）：
 #   happy-cli-<ver>-macos-arm64.tar.gz
 #   happy-cli-<ver>-macos-x64.tar.gz
 #   happy-cli-<ver>-linux-x64.tar.gz
@@ -29,10 +29,8 @@ on:
         required: true
         type: string
 
-env:
-  GITEA_BASE: https://open-1.kfafa.cn:30010
-  GITEA_OWNER: sunflowerfa
-  GITEA_REPO: happy
+permissions:
+  contents: write  # softprops/action-gh-release needs this to create/edit Release + upload assets
 
 jobs:
   prepare:
@@ -55,30 +53,6 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Building ${TAG}"
-
-      - name: Ensure Gitea Release exists (idempotent)
-        env:
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
-          TAG: ${{ steps.derive.outputs.tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          API="${{ env.GITEA_BASE }}/api/v1/repos/${{ env.GITEA_OWNER }}/${{ env.GITEA_REPO }}/releases"
-          # 已存在？
-          STATUS=$(curl -s -o /tmp/release.json -w "%{http_code}" \
-            -H "Authorization: token ${GITEA_TOKEN}" \
-            "${API}/tags/${TAG}")
-          if [ "$STATUS" = "200" ]; then
-            echo "Release ${TAG} already exists; will append assets."
-            exit 0
-          fi
-          # 不存在 → 创建
-          echo "Creating Release ${TAG} ..."
-          curl -fsSL -X POST \
-            -H "Authorization: token ${GITEA_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"happy-cli ${TAG#happy-cli-v}\n\nStandalone bundles for macOS arm64/x64, Linux x64, Windows x64.\"}" \
-            "${API}"
 
   bundle:
     needs: prepare
@@ -175,45 +149,26 @@ jobs:
           Compress-Archive -Path "dist-release\$STAGE\*" -DestinationPath "happy-cli-$VERSION-windows-x64.zip"
           Get-Item "happy-cli-$VERSION-windows-x64.zip"
 
-      - name: Upload asset to Gitea Release
-        shell: bash
-        env:
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          OS: ${{ matrix.os }}
-          ARCH: ${{ matrix.arch }}
-          EXT: ${{ matrix.archive }}
-        run: |
-          set -euo pipefail
-          if [ "${EXT}" = "zip" ]; then
-            FILE="happy-cli-${VERSION}-${OS}-${ARCH}.zip"
-          else
-            FILE="happy-cli-${VERSION}-${OS}-${ARCH}.tar.gz"
-          fi
-          API="${{ env.GITEA_BASE }}/api/v1/repos/${{ env.GITEA_OWNER }}/${{ env.GITEA_REPO }}/releases"
-          # 找到 Release id
-          REL_ID=$(curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" "${API}/tags/${TAG}" \
-                   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-          # 若已有同名 asset 先删（支持重跑）
-          curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" "${API}/${REL_ID}/assets" \
-            | python3 -c "
-          import json, sys, os
-          assets = json.load(sys.stdin)
-          for a in assets:
-              if a['name'] == os.environ['FILE']:
-                  print(a['id'])
-                  break
-          " > /tmp/existing_id.txt
-          if [ -s /tmp/existing_id.txt ]; then
-            OLD_ID=$(cat /tmp/existing_id.txt)
-            echo "Deleting existing asset id=${OLD_ID}"
-            curl -fsSL -X DELETE -H "Authorization: token ${GITEA_TOKEN}" \
-              "${API}/${REL_ID}/assets/${OLD_ID}"
-          fi
-          # 上传
-          echo "Uploading ${FILE} → Release ${TAG} (id=${REL_ID})"
-          curl -fsSL -X POST \
-            -H "Authorization: token ${GITEA_TOKEN}" \
-            -F "attachment=@${FILE}" \
-            "${API}/${REL_ID}/assets?name=${FILE}"
+      # softprops/action-gh-release@v2 自动创建 release（不存在时），上传 file，
+      # 已存在同名 asset 会被覆盖。4 个 matrix job 都指向同一个 tag，互不冲突。
+      - name: Publish asset to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          body: |
+            happy CLI ${{ needs.prepare.outputs.version }}
+
+            Standalone bundles for macOS arm64/x64, Linux x64, Windows x64.
+            Each tarball/zip contains vendored `node_modules` with `node-pty`
+            native binding precompiled for that platform — extract and run,
+            no `npm install`, no compilation required.
+
+            Install with one line:
+            ```
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+            ```
+          files: |
+            happy-cli-${{ needs.prepare.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+            happy-cli-${{ needs.prepare.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.zip
+          fail_on_unmatched_files: false  # 每个 job 只匹配自己平台的文件，正常

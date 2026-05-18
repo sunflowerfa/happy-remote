@@ -16,15 +16,15 @@
 
 set -eu
 
-# ====== 配置（你想发新版本就改这两行 + 重新上传 install.sh）======
+# ====== 配置（发新版本时改 HAPPY_CLI_VERSION 即可）======
 HAPPY_CLI_VERSION="${HAPPY_CLI_VERSION:-1.1.10-beta.4}"
-GITEA_BASE="${GITEA_BASE:-https://open-1.kfafa.cn:30010}"
-GITEA_OWNER="sunflowerfa"
-GITEA_REPO="happy"
+GITHUB_OWNER="sunflowerfa"
+GITHUB_REPO="happy-remote"
 DEFAULT_SERVER_URL="https://open-1.kfafa.cn:33333"
-# ============================================================
+# =====================================================
 
 RELEASE_TAG="happy-cli-v${HAPPY_CLI_VERSION}"
+RELEASE_BASE="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/${RELEASE_TAG}"
 INSTALL_ROOT="${HOME}/.local/share/happy"
 INSTALL_DIR="${INSTALL_ROOT}/${HAPPY_CLI_VERSION}"
 BIN_DIR="${HOME}/.local/bin"
@@ -103,7 +103,7 @@ check_deps() {
 # ---------- 3. 下载 + 解压 ----------
 download_and_extract() {
     TARBALL_NAME="happy-cli-${HAPPY_CLI_VERSION}-${PLATFORM}.${ARCHIVE_EXT}"
-    URL="${GITEA_BASE}/${GITEA_OWNER}/${GITEA_REPO}/releases/download/${RELEASE_TAG}/${TARBALL_NAME}"
+    URL="${RELEASE_BASE}/${TARBALL_NAME}"
     TMP=$(mktemp -d)
     trap 'rm -rf "$TMP"' EXIT
 
