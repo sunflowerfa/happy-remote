@@ -90,7 +90,7 @@ jobs:
         with:
           context: .
           file: Dockerfile.server
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
@@ -98,9 +98,9 @@ jobs:
             org.opencontainers.image.version=${{ steps.derive.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          # buildx layer cache lives in the runner cache for incremental rebuilds.
-          cache-from: type=gha,scope=happy-server
-          cache-to: type=gha,scope=happy-server,mode=max
+          # NOTE: GHA cache (type=gha) deliberately disabled —
+          # act_runner 内置 cache server (172.18.0.x:xxxxx) 从 buildx 容器不可达，
+          # 会在 cache export 阶段超时失败。每次全量构建，amd64-only 约 2-3 分钟可接受。
 
       - name: Generate release notes
         id: notes
@@ -123,7 +123,7 @@ jobs:
             echo "docker pull ${BASE}:latest"
             echo '```'
             echo ""
-            echo "**Supported platforms**: linux/amd64, linux/arm64"
+            echo "**Supported platforms**: linux/amd64"
             echo ""
             if [ -n "$PREV" ]; then
               echo "## Changes since ${PREV}"
