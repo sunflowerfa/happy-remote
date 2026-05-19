@@ -2612,6 +2612,18 @@ class Sync {
             notifyUnreadMessage();
         }
 
+        // Live PTY status-line frame from happy-cli — drop straight into the
+        // session record; the store discards out-of-order frames by timestamp.
+        if (updateData.type === 'session-progress') {
+            storage.getState().applySessionProgress(updateData.sessionId, {
+                elapsedMs: updateData.elapsedMs,
+                tokens: updateData.tokens,
+                effort: updateData.effort,
+                title: updateData.title,
+                timestamp: updateData.timestamp,
+            });
+        }
+
         // daemon-status ephemeral updates are deprecated, machine status is handled via machine-activity
     }
 

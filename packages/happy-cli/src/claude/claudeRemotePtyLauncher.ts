@@ -281,6 +281,9 @@ export async function claudeRemotePtyLauncher(deps: ClaudeRemotePtyLauncherDeps)
                         session.onThinkingChange(false);
                     }
                 },
+                onStatusLine: (status) => {
+                    session.onStatusLineChange(status);
+                },
                 onExit: (code, sig) => {
                     logger.debug(`[ptyRemote] child exited code=${code} signal=${sig}`);
                 },

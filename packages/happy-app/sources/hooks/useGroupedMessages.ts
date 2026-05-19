@@ -32,8 +32,13 @@ export type DisplayItem = TextItem | ToolGroupItem;
  * message passes through as a standalone TextItem — restoring the
  * pre-grouping behavior where MessageView renders each message (and
  * returns null for hidden tools/thinking) on its own.
+ *
+ * When `showThinking` is true, thinking messages stand alone in the
+ * stream (rendered with italic markdown by MessageView). When false,
+ * MessageView renders null for them, so they're excluded here to avoid
+ * empty group buffers.
  */
-export function useGroupedMessages(messages: Message[], enabled: boolean = true): DisplayItem[] {
+export function useGroupedMessages(messages: Message[], enabled: boolean = true, showThinking: boolean = true): DisplayItem[] {
     return React.useMemo(() => {
         if (!enabled) {
             return messages.map((msg) => ({ type: 'message', id: msg.id, message: msg } as TextItem));
@@ -63,11 +68,11 @@ export function useGroupedMessages(messages: Message[], enabled: boolean = true)
         };
 
         for (const msg of messages) {
-            if (isStandaloneMessage(msg) || isUserAttachment(msg)) {
+            if (isStandaloneMessage(msg, showThinking) || isUserAttachment(msg)) {
                 flushBuffer();
                 result.push({ type: 'message', id: msg.id, message: msg });
-            } else if (isInvisibleMessage(msg)) {
-                // Skip messages that render as null (hidden tools, thinking, empty text)
+            } else if (isInvisibleMessage(msg, showThinking)) {
+                // Skip messages that render as null (hidden tools, hidden thinking, empty text)
                 continue;
             } else {
                 buffer.push(msg);
@@ -76,32 +81,33 @@ export function useGroupedMessages(messages: Message[], enabled: boolean = true)
 
         flushBuffer();
         return result;
-    }, [messages, enabled]);
+    }, [messages, enabled, showThinking]);
 }
 
 /** Returns true for messages that should NOT be grouped (displayed standalone) */
-function isStandaloneMessage(msg: Message): boolean {
+function isStandaloneMessage(msg: Message, showThinking: boolean): boolean {
     if (msg.kind === 'user-text') return true;
     if (msg.kind === 'agent-event') return true; // Mode switches, "aborted by user", etc.
     if (msg.kind === 'agent-text') {
-        // Thinking messages go into groups, non-empty text stands alone
-        if (msg.isThinking) return false;
         if (msg.text.trim().length === 0) return false;
+        // Visible thinking renders inline with its own quoted style — keep
+        // it standalone so it doesn't collapse into a tool group.
+        if (msg.isThinking) return showThinking;
         return true;
     }
     return false;
 }
 
 /** Returns true for messages that render as null and should be excluded from groups */
-function isInvisibleMessage(msg: Message): boolean {
+function isInvisibleMessage(msg: Message, showThinking: boolean): boolean {
     // Hidden tools (ToolSearch, CodexReasoning, etc.)
     if (msg.kind === 'tool-call') {
         const known = knownTools[msg.tool.name as keyof typeof knownTools] as any;
         return known?.hidden === true;
     }
-    // Thinking messages render as null in MessageView
+    // Thinking messages render as null only when the user has hidden them.
     if (msg.kind === 'agent-text') {
-        if (msg.isThinking) return true;
+        if (msg.isThinking && !showThinking) return true;
         if (msg.text.trim().length === 0) return true;
     }
     return false;

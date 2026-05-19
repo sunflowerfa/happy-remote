@@ -180,6 +180,7 @@ interface StorageState {
     isDataReady: boolean;
     nativeUpdateStatus: { available: boolean; updateUrl?: string } | null;
     applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => void;
+    applySessionProgress: (sessionId: string, progress: Session['runtimeProgress']) => void;
     applyMachines: (machines: Machine[], replace?: boolean) => void;
     deleteMachine: (machineId: string) => void;
     applyLoaded: () => void;
@@ -400,6 +401,25 @@ export const storage = create<StorageState>()((set, get) => {
             const state = get();
             return Object.values(state.sessions).filter(s => s.active);
         },
+        applySessionProgress: (sessionId: string, progress: Session['runtimeProgress']) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+            // Drop frames older than what's already in the store — the
+            // ephemeral channel doesn't guarantee ordering across reconnects.
+            if (progress && session.runtimeProgress && progress.timestamp <= session.runtimeProgress.timestamp) {
+                return state;
+            }
+            return {
+                ...state,
+                sessions: {
+                    ...state.sessions,
+                    [sessionId]: {
+                        ...session,
+                        runtimeProgress: progress,
+                    },
+                },
+            };
+        }),
         applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => set((state) => {
             // Load drafts and permission modes if sessions are empty (initial load)
             const isInitialLoad = Object.keys(state.sessions).length === 0;
@@ -1442,6 +1462,10 @@ export function useSessionUsage(sessionId: string) {
         const session = state.sessionMessages[sessionId];
         return session?.reducerState?.latestUsage ?? null;
     }));
+}
+
+export function useSessionRuntimeProgress(sessionId: string) {
+    return storage(useShallow((state) => state.sessions[sessionId]?.runtimeProgress ?? null));
 }
 
 export function useSettings(): Settings {

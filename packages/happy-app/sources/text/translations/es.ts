@@ -312,6 +312,10 @@ export const es: TranslationStructure = {
         forkClaudeOnly: 'La bifurcación actualmente solo se admite para sesiones de Claude.',
     },
 
+    sessionProgress: {
+        effortSuffix: ({ effort }: { effort: string }) => `esfuerzo ${effort}`,
+    },
+
     commandPalette: {
         placeholder: 'Escriba un comando o busque...',
     },
@@ -384,6 +388,8 @@ export const es: TranslationStructure = {
         activity: 'Actividad',
         thinking: 'Pensando',
         thinkingSince: 'Pensando desde',
+        showThinking: 'Mostrar pensamiento',
+        showThinkingSubtitle: 'Mostrar el texto de razonamiento del agente en el chat',
         cliVersion: 'Versión del CLI',
         cliVersionOutdated: 'Actualización de CLI requerida',
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>

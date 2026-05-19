@@ -313,6 +313,10 @@ export const ja: TranslationStructure = {
         forkClaudeOnly: 'フォークは現在 Claude セッションのみ対応しています。',
     },
 
+    sessionProgress: {
+        effortSuffix: ({ effort }: { effort: string }) => `${effort} エフォート`,
+    },
+
     commandPalette: {
         placeholder: 'コマンドを入力または検索...',
     },
@@ -385,6 +389,8 @@ export const ja: TranslationStructure = {
         activity: 'アクティビティ',
         thinking: '思考中',
         thinkingSince: '思考開始時刻',
+        showThinking: '思考内容を表示',
+        showThinkingSubtitle: 'エージェントの推論テキストをチャットに表示します',
         cliVersion: 'CLIバージョン',
         cliVersionOutdated: 'CLIの更新が必要',
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>

@@ -326,6 +326,11 @@ export const en = {
         forkClaudeOnly: 'Fork is currently only supported for Claude sessions.',
     },
 
+    sessionProgress: {
+        // Used by the sticky bar that mirrors Claude's PTY status line.
+        effortSuffix: ({ effort }: { effort: string }) => `${effort} effort`,
+    },
+
     commandPalette: {
         placeholder: 'Type a command or search...',
     },
@@ -398,6 +403,8 @@ export const en = {
         activity: 'Activity',
         thinking: 'Thinking',
         thinkingSince: 'Thinking Since',
+        showThinking: 'Show Thinking',
+        showThinkingSubtitle: 'Display the agent’s reasoning text in chat',
         cliVersion: 'CLI Version',
         cliVersionOutdated: 'CLI Update Required',
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>

@@ -342,6 +342,8 @@ export const ru: TranslationStructure = {
         activity: 'Активность',
         thinking: 'Думает',
         thinkingSince: 'Думает с',
+        showThinking: 'Показывать размышления',
+        showThinkingSubtitle: 'Отображать текст рассуждений агента в чате',
         cliVersion: 'Версия CLI',
         cliVersionOutdated: 'Требуется обновление CLI',
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>
@@ -423,6 +425,10 @@ export const ru: TranslationStructure = {
         forkErrorMissingMetadata: 'Не хватает метаданных сессии для форка.',
         forkErrorGeneric: 'Не удалось форкнуть сессию.',
         forkClaudeOnly: 'Форк сейчас поддерживается только для Claude-сессий.',
+    },
+
+    sessionProgress: {
+        effortSuffix: ({ effort }: { effort: string }) => `усилие ${effort}`,
     },
 
     commandPalette: {

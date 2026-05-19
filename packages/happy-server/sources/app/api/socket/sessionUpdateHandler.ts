@@ -1,6 +1,6 @@
 import { getMetricsLabelsFromSocket, sessionAliveEventsCounter, websocketEventsCounter } from "@/app/monitoring/metrics2";
 import { activityCache } from "@/app/presence/sessionCache";
-import { buildNewMessageUpdate, buildSessionActivityEphemeral, buildUpdateSessionUpdate, ClientConnection, eventRouter } from "@/app/events/eventRouter";
+import { buildNewMessageUpdate, buildSessionActivityEphemeral, buildSessionProgressEphemeral, buildUpdateSessionUpdate, ClientConnection, eventRouter } from "@/app/events/eventRouter";
 import { db } from "@/storage/db";
 import { allocateSessionSeq, allocateUserSeq } from "@/storage/seq";
 import { AsyncLock } from "@/utils/lock";
@@ -243,6 +243,69 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                 log({ module: 'websocket', level: 'error' }, `Error in message handler: ${error}`);
             }
         });
+    });
+
+    socket.on('session-progress', async (data: {
+        sid: string;
+        time: number;
+        elapsedMs: number;
+        tokens: number;
+        effort?: string;
+        title?: string;
+    }) => {
+        try {
+            websocketEventsCounter.inc({ event_type: 'session-progress', ...labels });
+
+            // Validate payload shape — drop silently on malformed input so a
+            // future Claude TUI format change can't crash the handler.
+            if (
+                !data ||
+                typeof data.sid !== 'string' ||
+                typeof data.time !== 'number' ||
+                typeof data.elapsedMs !== 'number' ||
+                typeof data.tokens !== 'number'
+            ) {
+                return;
+            }
+            if (data.elapsedMs < 0 || data.tokens < 0) {
+                return;
+            }
+
+            let t = data.time;
+            const now = Date.now();
+            if (t > now) {
+                t = now;
+            }
+            if (t < now - 1000 * 60 * 10) {
+                return;
+            }
+
+            const isValid = await activityCache.isSessionValid(data.sid, userId);
+            if (!isValid) {
+                return;
+            }
+
+            // Cap free-form text so a misbehaving client can't ship a huge
+            // string through ephemeral broadcast.
+            const title = typeof data.title === 'string' ? data.title.slice(0, 200) : undefined;
+            const effort = typeof data.effort === 'string' ? data.effort.slice(0, 32) : undefined;
+
+            const payload = buildSessionProgressEphemeral(
+                data.sid,
+                Math.floor(data.elapsedMs),
+                Math.floor(data.tokens),
+                effort,
+                title,
+                t,
+            );
+            eventRouter.emitEphemeral({
+                userId,
+                payload,
+                recipientFilter: { type: 'user-scoped-only' }
+            });
+        } catch (error) {
+            log({ module: 'websocket', level: 'error' }, `Error in session-progress: ${error}`);
+        }
     });
 
     socket.on('session-end', async (data: {

@@ -632,6 +632,30 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     /**
+     * Forward Claude TUI live status line (elapsed / tokens / effort /
+     * task title) so the mobile app can mirror the desktop view while a
+     * turn is in flight. Use `volatile.emit` like keepAlive — dropping
+     * an in-flight packet on reconnect is fine, the next status redraw
+     * supersedes it anyway.
+     */
+    sendSessionProgress(progress: {
+        time: number;
+        elapsedMs: number;
+        tokens: number;
+        effort?: string;
+        title?: string;
+    }) {
+        this.socket.volatile.emit('session-progress', {
+            sid: this.sessionId,
+            time: progress.time,
+            elapsedMs: progress.elapsedMs,
+            tokens: progress.tokens,
+            effort: progress.effort,
+            title: progress.title,
+        });
+    }
+
+    /**
      * Send session death message
      */
     sendSessionDeath() {

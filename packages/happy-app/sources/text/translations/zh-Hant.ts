@@ -312,6 +312,10 @@ export const zhHant: TranslationStructure = {
         forkClaudeOnly: '目前僅支援 Claude 會話的分叉。',
     },
 
+    sessionProgress: {
+        effortSuffix: ({ effort }: { effort: string }) => `${effort} 投入`,
+    },
+
     commandPalette: {
         placeholder: '輸入命令或搜尋...',
     },
@@ -384,6 +388,8 @@ export const zhHant: TranslationStructure = {
         activity: '活動',
         thinking: '思考中',
         thinkingSince: '思考開始時間',
+        showThinking: '顯示思考過程',
+        showThinkingSubtitle: '在聊天中展示 AI 的推理文字',
         cliVersion: 'CLI 版本',
         cliVersionOutdated: '需要更新 CLI',
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>

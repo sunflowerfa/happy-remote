@@ -329,6 +329,10 @@ export const pl: TranslationStructure = {
         forkClaudeOnly: 'Rozwidlenie jest obecnie obsługiwane tylko dla sesji Claude.',
     },
 
+    sessionProgress: {
+        effortSuffix: ({ effort }: { effort: string }) => `wysiłek ${effort}`,
+    },
+
     commandPalette: {
         placeholder: 'Wpisz polecenie lub wyszukaj...',
     },
@@ -401,6 +405,8 @@ export const pl: TranslationStructure = {
         activity: 'Aktywność',
         thinking: 'Myśli',
         thinkingSince: 'Myśli od',
+        showThinking: 'Pokaż myślenie',
+        showThinkingSubtitle: 'Wyświetlaj tekst rozumowania agenta w czacie',
         cliVersion: 'Wersja CLI',
         cliVersionOutdated: 'Wymagana aktualizacja CLI',
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>

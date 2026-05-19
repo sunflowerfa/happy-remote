@@ -7,7 +7,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
-import { useSession, useIsDataReady } from '@/sync/storage';
+import { useSession, useIsDataReady, useLocalSettingMutable } from '@/sync/storage';
 import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId, getResumeCommand } from '@/utils/sessionUtils';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
@@ -530,6 +530,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                             showChevron={false}
                         />
                     )}
+                    <ShowThinkingToggle />
                 </ItemGroup>
 
                 {/* Raw JSON (Dev Mode Only) */}
@@ -635,6 +636,23 @@ export default React.memo(() => {
 
     return <SessionInfoContent session={session} />;
 });
+
+function ShowThinkingToggle() {
+    const [showThinking, setShowThinking] = useLocalSettingMutable('showThinking');
+    const handleToggle = useCallback(() => {
+        setShowThinking(!showThinking);
+    }, [showThinking, setShowThinking]);
+    return (
+        <Item
+            title={t('sessionInfo.showThinking')}
+            subtitle={t('sessionInfo.showThinkingSubtitle')}
+            detail={showThinking ? t('common.yes') : t('common.no')}
+            icon={<Ionicons name="sparkles-outline" size={29} color={showThinking ? '#FFCC00' : '#8E8E93'} />}
+            showChevron={false}
+            onPress={handleToggle}
+        />
+    );
+}
 
 function CopyableItem({ title, subtitle, icon, copyText }: { title: string; subtitle: string; icon: React.ReactNode; copyText: string }) {
     const [copied, setCopied] = React.useState(false);

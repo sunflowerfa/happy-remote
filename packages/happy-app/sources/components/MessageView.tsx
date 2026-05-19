@@ -8,6 +8,7 @@ import { Metadata } from "@/sync/storageTypes";
 import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
 import { sync } from '@/sync/sync';
+import { useLocalSetting } from '@/sync/storage';
 import { Option } from './markdown/MarkdownView';
 import { layout } from "./layout";
 import { parseLocalCommandMessage, isUserSlashCommandEcho } from './parseLocalCommandMessage';
@@ -153,13 +154,13 @@ function AgentTextBlock(props: {
     sync.sendMessage(props.sessionId, option.title, { source: 'option' });
   }, [props.sessionId]);
 
-  // Hide thinking messages
-  if (props.message.isThinking) {
+  const showThinking = useLocalSetting('showThinking');
+  if (props.message.isThinking && !showThinking) {
     return null;
   }
 
   return (
-    <View style={styles.agentMessageContainer}>
+    <View style={props.message.isThinking ? styles.agentThinkingContainer : styles.agentMessageContainer}>
       <MarkdownView markdown={props.message.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
     </View>
   );
@@ -276,6 +277,15 @@ const styles = StyleSheet.create((theme) => ({
     marginHorizontal: 16,
     marginBottom: 12,
     borderRadius: 16,
+    maxWidth: '100%',
+  },
+  agentThinkingContainer: {
+    marginHorizontal: 16,
+    marginBottom: 12,
+    paddingLeft: 12,
+    borderLeftWidth: 2,
+    borderLeftColor: theme.colors.agentEventText,
+    opacity: 0.7,
     maxWidth: '100%',
   },
   agentEventContainer: {

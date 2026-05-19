@@ -312,6 +312,10 @@ export const ca: TranslationStructure = {
         forkClaudeOnly: 'La bifurcació només està disponible per a sessions de Claude.',
     },
 
+    sessionProgress: {
+        effortSuffix: ({ effort }: { effort: string }) => `esforç ${effort}`,
+    },
+
     commandPalette: {
         placeholder: 'Escriu una comanda o cerca...',
     },
@@ -384,6 +388,8 @@ export const ca: TranslationStructure = {
         activity: 'Activitat',
         thinking: 'Pensant',
         thinkingSince: 'Pensant des de',
+        showThinking: 'Mostra el raonament',
+        showThinkingSubtitle: 'Mostra el text de raonament de l’agent al xat',
         cliVersion: 'Versió del CLI',
         cliVersionOutdated: 'Actualització del CLI requerida',
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>

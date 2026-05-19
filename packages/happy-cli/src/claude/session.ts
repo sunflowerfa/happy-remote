@@ -4,6 +4,8 @@ import { EnhancedMode } from "./loop";
 import { logger } from "@/ui/logger";
 import type { JsRuntime } from "./runClaude";
 import type { SandboxConfig } from "@/persistence";
+import type { PtyStatusLine } from "./utils/ptyStatusLine";
+import { ptyStatusLineHash } from "./utils/ptyStatusLine";
 
 export class Session {
     readonly path: string;
@@ -25,12 +27,19 @@ export class Session {
     sessionId: string | null;
     mode: 'local' | 'remote' = 'local';
     thinking: boolean = false;
-    
+
     /** Callbacks to be notified when session ID is found/changed */
     private sessionFoundCallbacks: ((sessionId: string) => void)[] = [];
-    
+
     /** Keep alive interval reference for cleanup */
     private keepAliveInterval: NodeJS.Timeout;
+
+    /** Throttle state for PTY status-line forwarding. */
+    private static readonly STATUS_LINE_MIN_INTERVAL_MS = 250;
+    private lastStatusLineSentAt = 0;
+    private lastStatusLineHash: string | null = null;
+    private pendingStatusLine: PtyStatusLine | null = null;
+    private statusLineFlushTimer: NodeJS.Timeout | null = null;
 
     constructor(opts: {
         api: ApiClient,
@@ -77,6 +86,10 @@ export class Session {
      */
     cleanup = (): void => {
         clearInterval(this.keepAliveInterval);
+        if (this.statusLineFlushTimer) {
+            clearTimeout(this.statusLineFlushTimer);
+            this.statusLineFlushTimer = null;
+        }
         this.sessionFoundCallbacks = [];
         logger.debug('[Session] Cleaned up resources');
     }
@@ -84,6 +97,63 @@ export class Session {
     onThinkingChange = (thinking: boolean) => {
         this.thinking = thinking;
         this.client.keepAlive(thinking, this.mode);
+        // When a turn ends, drain any pending status-line packet so the
+        // mobile UI sees the final numbers before the bar fades out.
+        if (!thinking) {
+            this.flushPendingStatusLine();
+        }
+    }
+
+    /**
+     * Forward a fresh PTY status-line snapshot to the server. The PTY
+     * driver already de-dupes by hash, so this method only owns the
+     * 4Hz rate limit (250ms min interval, leading + trailing).
+     */
+    onStatusLineChange = (status: PtyStatusLine) => {
+        const hash = ptyStatusLineHash(status);
+        if (hash === this.lastStatusLineHash) return;
+
+        const now = Date.now();
+        const elapsedSinceLast = now - this.lastStatusLineSentAt;
+        if (elapsedSinceLast >= Session.STATUS_LINE_MIN_INTERVAL_MS) {
+            this.emitStatusLine(status, hash, now);
+            return;
+        }
+
+        // Too soon — store the latest and arm a trailing flush so the
+        // newest value still lands.
+        this.pendingStatusLine = status;
+        if (!this.statusLineFlushTimer) {
+            const wait = Session.STATUS_LINE_MIN_INTERVAL_MS - elapsedSinceLast;
+            this.statusLineFlushTimer = setTimeout(() => {
+                this.statusLineFlushTimer = null;
+                this.flushPendingStatusLine();
+            }, wait);
+        }
+    }
+
+    private flushPendingStatusLine = () => {
+        if (this.statusLineFlushTimer) {
+            clearTimeout(this.statusLineFlushTimer);
+            this.statusLineFlushTimer = null;
+        }
+        const pending = this.pendingStatusLine;
+        if (!pending) return;
+        this.pendingStatusLine = null;
+        const hash = ptyStatusLineHash(pending);
+        this.emitStatusLine(pending, hash, Date.now());
+    }
+
+    private emitStatusLine = (status: PtyStatusLine, hash: string, now: number) => {
+        this.lastStatusLineHash = hash;
+        this.lastStatusLineSentAt = now;
+        this.client.sendSessionProgress({
+            time: now,
+            elapsedMs: status.elapsedMs,
+            tokens: status.tokens,
+            effort: status.effort,
+            title: status.title,
+        });
     }
 
     onModeChange = (mode: 'local' | 'remote') => {

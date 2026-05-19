@@ -193,6 +193,14 @@ export type EphemeralEvent = {
     title: string;
     body: string;
     timestamp: number;
+} | {
+    type: 'session-progress';
+    sessionId: string;
+    elapsedMs: number;
+    tokens: number;
+    effort?: string;
+    title?: string;
+    timestamp: number;
 };
 
 // === EVENT PAYLOAD TYPES ===
@@ -548,6 +556,33 @@ export function buildSessionEventEphemeral(sessionId: string, kind: 'done' | 'pe
         title,
         body,
         timestamp: Date.now()
+    };
+}
+
+/**
+ * Live PTY status-line snapshot (elapsed / tokens / effort / current task
+ * title). Forwarded from happy-cli at up to 4Hz while a turn is in flight,
+ * so the mobile app can mirror what the desktop user sees in Claude TUI.
+ *
+ * Pure ephemeral — never persisted. Last-write-wins; clients drop stale
+ * frames by comparing `timestamp`.
+ */
+export function buildSessionProgressEphemeral(
+    sessionId: string,
+    elapsedMs: number,
+    tokens: number,
+    effort: string | undefined,
+    title: string | undefined,
+    timestamp: number,
+): EphemeralPayload {
+    return {
+        type: 'session-progress',
+        sessionId,
+        elapsedMs,
+        tokens,
+        ...(effort ? { effort } : {}),
+        ...(title ? { title } : {}),
+        timestamp,
     };
 }
 

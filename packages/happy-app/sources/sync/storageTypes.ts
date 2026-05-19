@@ -127,6 +127,16 @@ export interface Session {
         contextSize: number;
         timestamp: number;
     } | null;
+    // Live PTY status-line snapshot — Claude TUI's bottom bar mirrored from
+    // happy-cli in PTY mode. Only meaningful while `thinking` is true; the
+    // UI gates rendering on that. Updated via the session-progress ephemeral.
+    runtimeProgress?: {
+        elapsedMs: number;
+        tokens: number;
+        effort?: string;
+        title?: string;
+        timestamp: number;
+    } | null;
 }
 
 export interface DecryptedMessage {

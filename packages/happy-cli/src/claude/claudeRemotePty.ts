@@ -36,6 +36,7 @@ import { awaitFileExist } from '@/modules/watcher/awaitFileExist';
 import { getProjectPath } from './utils/path';
 import type { EnhancedMode } from './loop';
 import { mapToClaudeMode } from './utils/permissionMode';
+import { extractPtyStatusLine, ptyStatusLineHash, type PtyStatusLine } from './utils/ptyStatusLine';
 
 export type PtyLifecycle = 'starting' | 'ready' | 'thinking' | 'idle' | 'exited';
 
@@ -72,6 +73,13 @@ export interface ClaudeRemotePtyOptions {
     onExit?: (code: number | undefined, signal: string | null | undefined) => void;
     /** Notified when raw PTY bytes arrive — for diagnostics only. */
     onRawData?: (chunk: string) => void;
+    /**
+     * Notified when Claude's live status line (elapsed / tokens / effort
+     * / current task title) changes. Already de-duplicated against the
+     * previous emission via stable hash, so consumers can forward the
+     * payload directly to the network with their own throttle.
+     */
+    onStatusLine?: (status: PtyStatusLine) => void;
 }
 
 export interface ClaudeRemotePty {
@@ -198,6 +206,7 @@ export async function startClaudeRemotePty(opts: ClaudeRemotePtyOptions): Promis
     let lastByteAt = Date.now();
     let lastReadyKickAt = 0;
     let trustAcknowledged = false;
+    let lastStatusHash: string | null = null;
 
     function setLifecycle(next: PtyLifecycle) {
         if (lifecycle === next) return;
@@ -268,6 +277,20 @@ export async function startClaudeRemotePty(opts: ClaudeRemotePtyOptions): Promis
             if (lifecycle !== 'thinking') {
                 setLifecycle('thinking');
                 opts.onThinkingChange?.(true);
+            }
+        }
+
+        // Status-line scrape — only meaningful while thinking. Regex miss
+        // is silent so a future Claude footer reformat degrades to the
+        // thinking-boolean signal we already had.
+        if (opts.onStatusLine && (thinkingHit || lifecycle === 'thinking')) {
+            const status = extractPtyStatusLine(clean);
+            if (status) {
+                const hash = ptyStatusLineHash(status);
+                if (hash !== lastStatusHash) {
+                    lastStatusHash = hash;
+                    opts.onStatusLine(status);
+                }
             }
         }
     });

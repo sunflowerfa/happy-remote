@@ -1,7 +1,7 @@
 import * as React from 'react';
-import { useSession, useSessionMessages, useSetting } from "@/sync/storage";
+import { useLocalSetting, useSession, useSessionMessages, useSessionRuntimeProgress, useSetting } from "@/sync/storage";
 import { sync } from '@/sync/sync';
-import { ActivityIndicator, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, View } from 'react-native';
+import { ActivityIndicator, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, Text, View } from 'react-native';
 import { useCallback } from 'react';
 import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -16,6 +16,8 @@ import { Octicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Modal } from '@/modal';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
+import { Typography } from '@/constants/Typography';
+import { t } from '@/text';
 
 const SCROLL_THRESHOLD = 300;
 
@@ -77,7 +79,8 @@ const ChatListInternal = React.memo((props: {
     // Group consecutive tool calls between text messages into collapsible
     // containers — unless the user disabled it in settings.
     const groupToolCalls = useSetting('groupToolCalls');
-    const displayItems = useGroupedMessages(props.messages, groupToolCalls);
+    const showThinking = useLocalSetting('showThinking');
+    const displayItems = useGroupedMessages(props.messages, groupToolCalls, showThinking);
 
     // Track which groups the user has manually toggled (flips their default state)
     const [toggledGroups, setToggledGroups] = React.useState<Set<string>>(new Set());
@@ -202,6 +205,7 @@ const ChatListInternal = React.memo((props: {
 
     return (
         <View style={{ flex: 1 }}>
+            <SessionProgressBar sessionId={props.sessionId} />
             <FlatList
                 ref={flatListRef}
                 data={displayItems}
@@ -248,7 +252,94 @@ const ChatListInternal = React.memo((props: {
     )
 });
 
+/**
+ * Sticky status bar that mirrors Claude TUI's bottom-line state while a
+ * turn is thinking. Pinned to the visual top of the message stream, just
+ * under the navigation header. Renders nothing when the session isn't
+ * thinking or no runtime progress has been received yet — so PTY sessions
+ * with the bar enabled cost zero pixels at rest, and SDK sessions never
+ * see it.
+ */
+const SessionProgressBar = React.memo((props: { sessionId: string }) => {
+    const session = useSession(props.sessionId);
+    const progress = useSessionRuntimeProgress(props.sessionId);
+    const headerHeight = useHeaderHeight();
+    const safeArea = useSafeAreaInsets();
+
+    if (!session?.thinking || !progress) return null;
+
+    const elapsedLabel = formatElapsed(progress.elapsedMs);
+    const tokensLabel = formatTokens(progress.tokens);
+
+    return (
+        <View
+            pointerEvents="none"
+            style={[styles.progressBarContainer, { top: headerHeight + safeArea.top + 4 }]}
+        >
+            <View style={styles.progressBar}>
+                {progress.title ? (
+                    <Text numberOfLines={1} style={styles.progressTitle}>
+                        {progress.title}
+                    </Text>
+                ) : null}
+                <Text numberOfLines={1} style={styles.progressMeta}>
+                    {elapsedLabel}
+                    {'  ·  ↓ '}
+                    {tokensLabel}
+                    {progress.effort ? `  ·  ${t('sessionProgress.effortSuffix', { effort: progress.effort })}` : ''}
+                </Text>
+            </View>
+        </View>
+    );
+});
+
+function formatElapsed(ms: number): string {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(totalSeconds / 60);
+    const s = totalSeconds % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function formatTokens(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+    return String(n);
+}
+
 const styles = StyleSheet.create((theme) => ({
+    progressBarContainer: {
+        position: 'absolute',
+        left: 12,
+        right: 12,
+        zIndex: 5,
+        alignItems: 'center',
+    },
+    progressBar: {
+        maxWidth: 480,
+        width: '100%',
+        backgroundColor: theme.colors.surface,
+        borderColor: theme.colors.divider,
+        borderWidth: 1,
+        borderRadius: 12,
+        paddingHorizontal: 12,
+        paddingVertical: 8,
+        shadowColor: theme.colors.shadow.color,
+        shadowOffset: { width: 0, height: 1 },
+        shadowRadius: 4,
+        shadowOpacity: theme.colors.shadow.opacity * 0.6,
+        elevation: 3,
+    },
+    progressTitle: {
+        color: theme.colors.text,
+        fontSize: 13,
+        marginBottom: 2,
+        ...Typography.default('semiBold'),
+    },
+    progressMeta: {
+        color: theme.colors.textSecondary,
+        fontSize: 12,
+        ...Typography.mono(),
+    },
     scrollButtonContainer: {
         position: 'absolute',
         left: 0,

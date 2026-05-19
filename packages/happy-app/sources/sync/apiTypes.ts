@@ -199,14 +199,26 @@ export const ApiEphemeralSessionEventUpdateSchema = z.object({
     timestamp: z.number(),
 });
 
+export const ApiEphemeralSessionProgressUpdateSchema = z.object({
+    type: z.literal('session-progress'),
+    sessionId: z.string(),
+    elapsedMs: z.number(),
+    tokens: z.number(),
+    effort: z.string().optional(),
+    title: z.string().optional(),
+    timestamp: z.number(),
+});
+
 export const ApiEphemeralUpdateSchema = z.union([
     ApiEphemeralActivityUpdateSchema,
     ApiEphemeralUsageUpdateSchema,
     ApiEphemeralMachineActivityUpdateSchema,
     ApiEphemeralSessionEventUpdateSchema,
+    ApiEphemeralSessionProgressUpdateSchema,
 ]);
 
 export type ApiEphemeralActivityUpdate = z.infer<typeof ApiEphemeralActivityUpdateSchema>;
+export type ApiEphemeralSessionProgressUpdate = z.infer<typeof ApiEphemeralSessionProgressUpdateSchema>;
 export type ApiEphemeralUpdate = z.infer<typeof ApiEphemeralUpdateSchema>;
 
 // Machine metadata updates use Partial<MachineMetadata> from storageTypes
