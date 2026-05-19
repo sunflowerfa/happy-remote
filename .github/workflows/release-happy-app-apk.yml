@@ -1,0 +1,146 @@
+# GitHub Actions — happy-app Android APK build
+#
+# 在 ubuntu-latest 上跑 expo prebuild + gradle assembleRelease，使用 Android
+# debug.keystore 签名（侧载分发用，不上 Play Store）。产物：
+#   happy-app-<APP_ENV>-<tag>.apk
+#
+# 触发：
+#   - push tag `happy-app-v*`（推荐：`git push github happy-app-v0.1.0`）
+#   - push tag `v*`（兼容现有 monorepo 通用版本号）
+#   - workflow_dispatch（UI 手动触发，可选 APP_ENV）
+#
+# 不需要任何 secret —— GITHUB_TOKEN 自动注入用于 Release 上传；签名走
+# Expo 模板自带的 debug.keystore，无需额外配置。
+#
+# 注意：debug.keystore 签的 APK 不能上 Google Play，且与正式版本 cert
+# 不同 —— 用户从 GitHub 装这个 APK 之前可能需要卸载其他来源的同包名应用。
+
+name: release-happy-app-apk
+
+on:
+  push:
+    tags:
+      - "happy-app-v*"
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      app_env:
+        description: "APP_ENV (production | preview | development)"
+        required: false
+        default: "production"
+        type: choice
+        options:
+          - production
+          - preview
+          - development
+
+permissions:
+  contents: write  # softprops/action-gh-release 需要写 Release
+
+concurrency:
+  group: release-happy-app-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      APP_ENV: ${{ github.event.inputs.app_env || 'production' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('packages/happy-app/package.json', 'packages/happy-app/app.config.js') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Install monorepo deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build @slopus/happy-wire (workspace dep)
+        # happy-app 在运行时通过 dist 引用 happy-wire；CI 上需要先产出 dist
+        # 才能让 prebuild / metro 解析到正确的类型与运行时模块。
+        run: pnpm --filter @slopus/happy-wire build
+
+      - name: Expo prebuild (Android only)
+        working-directory: packages/happy-app
+        run: pnpm exec expo prebuild --platform android --no-install --non-interactive
+
+      - name: Verify release variant uses debug.keystore
+        working-directory: packages/happy-app/android/app
+        run: |
+          # Expo 模板默认让 release variant 也用 debug.keystore 签 —— 这就是
+          # 我们这条 CI 流水线赖以工作的前提。如果将来 Expo 模板改成要求
+          # 用户自带 keystore，构建会无声地产出未签名 APK；这里提前 fail
+          # fast，把"模板变化"明确暴露出来。
+          if ! grep -q 'signingConfig signingConfigs\.debug' build.gradle; then
+            echo "::error::Expo Android template no longer ships release-with-debug-keystore signing — workflow needs updating to provide a real keystore."
+            exit 1
+          fi
+
+      - name: Build APK
+        working-directory: packages/happy-app/android
+        env:
+          GRADLE_OPTS: "-Xmx4g -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Locate APK
+        id: locate
+        run: |
+          set -euo pipefail
+          src=$(find packages/happy-app/android/app/build/outputs/apk/release -name '*.apk' | head -1)
+          if [ -z "$src" ]; then
+            echo "::error::No APK produced under android/app/build/outputs/apk/release"
+            exit 1
+          fi
+          tag="${GITHUB_REF_NAME:-manual}"
+          dest="happy-app-${APP_ENV}-${tag}.apk"
+          cp "$src" "$dest"
+          echo "apk=$dest" >> "$GITHUB_OUTPUT"
+          ls -lh "$dest"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.locate.outputs.apk }}
+          path: ${{ steps.locate.outputs.apk }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.locate.outputs.apk }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
